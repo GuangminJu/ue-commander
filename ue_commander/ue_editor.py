@@ -4,12 +4,44 @@ All calls go through a single dispatch endpoint.
 """
 
 import json
+import os
+import socket
 import urllib.request
 import urllib.error
+from pathlib import Path
 from typing import Any
 
 DEFAULT_PORT = 9090
 DEFAULT_TIMEOUT = 10  # seconds
+# Longer timeout for interaction calls — some may trigger UI changes that take time
+INTERACTION_TIMEOUT = 15
+
+
+def _get_crash_file_path() -> Path | None:
+    """Get the path to the plugin's crash file (Saved/.ohmy_crash.json)."""
+    project_path = os.environ.get("UE_PROJECT_PATH", "")
+    if not project_path:
+        return None
+    return Path(project_path) / "Saved" / ".ohmy_crash.json"
+
+
+def read_crash_info() -> dict | None:
+    """Read and return crash info if the crash file exists. Returns None if no crash."""
+    path = _get_crash_file_path()
+    if path is None or not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data
+    except (json.JSONDecodeError, OSError):
+        return {"error": "Crash file exists but could not be parsed", "path": str(path)}
+
+
+def clear_crash_info() -> None:
+    """Delete the crash file (call after user has seen the crash info)."""
+    path = _get_crash_file_path()
+    if path is not None and path.exists():
+        path.unlink(missing_ok=True)
 
 
 def _base_url(port: int = DEFAULT_PORT) -> str:
@@ -41,11 +73,28 @@ def call_plugin(function_name: str, port: int = DEFAULT_PORT, timeout: int = DEF
                 return json.loads(body)
             except json.JSONDecodeError:
                 return {"raw": body}
-    except urllib.error.URLError as e:
+    except (socket.timeout, TimeoutError, ConnectionRefusedError,
+            ConnectionResetError, urllib.error.URLError, OSError) as e:
+        # Connection lost — check if UE wrote a crash file
+        crash = read_crash_info()
+        if crash is not None:
+            return {
+                "error": "UE editor crashed during MCP operation.",
+                "crashed": True,
+                "crash_info": crash,
+            }
+        # No crash file — might be a timeout or UE is still starting
+        alive = is_plugin_available(port=port)
+        if not alive:
+            return {
+                "error": "UE editor appears to have crashed or become unresponsive. "
+                         "No crash file found — check Saved/Crashes/ for details.",
+                "crashed": True,
+            }
         return {
-            "error": f"Cannot connect to UE plugin at {url}. "
-                     "Is the editor running with OhMyUnrealEngine loaded?",
-            "detail": str(e),
+            "error": f"Request to {function_name} timed out after {timeout}s, "
+                     "but UE is still running.",
+            "crashed": False,
         }
     except Exception as e:
         return {"error": str(e)}

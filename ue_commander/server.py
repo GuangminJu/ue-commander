@@ -364,7 +364,19 @@ def ue_plugin_status() -> dict:
     """
     Check if the OhMyUnrealEngine plugin is reachable inside the running editor.
     Returns the list of available plugin tools if connected.
+    Also checks for crash info if the plugin is not reachable.
     """
+    # First check if there's a crash file from a previous crash
+    crash = ue_editor.read_crash_info()
+    if crash is not None:
+        return {
+            "ok": False,
+            "crashed": True,
+            "crash_info": crash,
+            "hint": "UE crashed. Check crash_info for details. "
+                    "Fix the issue and relaunch UE.",
+        }
+
     if not ue_editor.is_plugin_available():
         return {
             "ok": False,
@@ -372,6 +384,22 @@ def ue_plugin_status() -> dict:
         }
     tools = ue_editor.list_plugin_tools()
     return {"ok": True, **tools}
+
+
+@mcp.tool()
+def ue_clear_crash() -> dict:
+    """
+    Clear the crash info file after reviewing a crash.
+    Call this after you've fixed the issue that caused the crash,
+    before relaunching UE.
+    """
+    crash = ue_editor.read_crash_info()
+    ue_editor.clear_crash_info()
+    return {
+        "ok": True,
+        "cleared": crash is not None,
+        "previous_crash": crash,
+    }
 
 
 @mcp.tool()
@@ -452,3 +480,84 @@ def ue_list_plugin_tools() -> dict:
     tagged with meta=(MCP) in UOhMyToolkit is listed here.
     """
     return ue_editor.list_plugin_tools()
+
+
+# ---------------------------------------------------------------------------
+# Widget interaction tools (require OhMyUnrealEngine plugin)
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def ue_click_widget(widget_path: str, button: str = "left") -> dict:
+    """
+    Simulate a mouse click on a widget WITHOUT moving the user's real cursor.
+    The click is routed through Slate internally.
+
+    Args:
+        widget_path: Widget path from ue_get_widget_tree or ue_search_widgets.
+        button: "left", "right", or "middle". Default "left".
+    """
+    return ue_editor.call_plugin("ClickWidget", WidgetPath=widget_path, Button=button)
+
+
+@mcp.tool()
+def ue_hover_widget(widget_path: str) -> dict:
+    """
+    Simulate mouse hover over a widget (triggers OnMouseEnter/OnMouseMove).
+    Does NOT move the user's real cursor.
+
+    Args:
+        widget_path: Widget path from ue_get_widget_tree or ue_search_widgets.
+    """
+    return ue_editor.call_plugin("HoverWidget", WidgetPath=widget_path)
+
+
+@mcp.tool()
+def ue_focus_widget(widget_path: str) -> dict:
+    """
+    Set keyboard focus to a widget. Required before typing text.
+
+    Args:
+        widget_path: Widget path from ue_get_widget_tree or ue_search_widgets.
+    """
+    return ue_editor.call_plugin("FocusWidget", WidgetPath=widget_path)
+
+
+@mcp.tool()
+def ue_type_text(text: str, widget_path: str = "") -> dict:
+    """
+    Type text into a widget. If widget_path is given, focuses it first.
+    Each character is sent as an individual keyboard event.
+
+    Args:
+        text: The text to type.
+        widget_path: Optional path to focus before typing. Empty = use current focus.
+    """
+    return ue_editor.call_plugin("TypeText", Text=text, WidgetPath=widget_path)
+
+
+@mcp.tool()
+def ue_press_key(key: str, widget_path: str = "", modifiers: str = "") -> dict:
+    """
+    Simulate a key press (down + up).
+
+    Args:
+        key: UE key name — "Enter", "Tab", "Escape", "Delete", "Backspace",
+             "Up", "Down", "Left", "Right", "A"-"Z", "F1"-"F12", etc.
+        widget_path: Optional path to focus before pressing.
+        modifiers: Comma-separated: "ctrl", "shift", "alt", "cmd".
+    """
+    return ue_editor.call_plugin(
+        "PressKey", Key=key, WidgetPath=widget_path, Modifiers=modifiers
+    )
+
+
+@mcp.tool()
+def ue_scroll_widget(widget_path: str, delta: float = 3.0) -> dict:
+    """
+    Simulate mouse scroll on a widget.
+
+    Args:
+        widget_path: Widget path from ue_get_widget_tree or ue_search_widgets.
+        delta: Scroll amount. Positive = up, negative = down. Default 3.0.
+    """
+    return ue_editor.call_plugin("ScrollWidget", WidgetPath=widget_path, Delta=delta)
