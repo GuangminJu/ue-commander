@@ -1023,6 +1023,93 @@ def ue_import_asset(file_path: str, dest_path: str = "/Game", dest_name: str = "
 
 
 # ---------------------------------------------------------------------------
+# Component tools
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def ue_add_component(actor_name: str, component_class: str, component_name: str = "") -> dict:
+    """
+    Add a component to an actor.
+
+    Args:
+        actor_name: Actor name.
+        component_class: Component class (e.g. "StaticMeshComponent", "PointLightComponent",
+                         "BoxCollisionComponent", "AudioComponent", "ArrowComponent").
+        component_name: Optional name. Auto-generated if empty.
+    """
+    return ue_editor.call_plugin(
+        "AddComponent", ActorName=actor_name,
+        ComponentClass=component_class, ComponentName=component_name,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Hierarchy tools
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def ue_get_actor_hierarchy(actor_name: str = "") -> dict:
+    """
+    Get actor parent/child hierarchy. Empty = show root actors.
+
+    Args:
+        actor_name: Actor name. Empty shows all root actors with child counts.
+    """
+    return ue_editor.call_plugin("GetActorHierarchy", ActorName=actor_name)
+
+
+@mcp.tool()
+def ue_attach_actor(child_name: str, parent_name: str) -> dict:
+    """
+    Attach an actor to a parent actor.
+
+    Args:
+        child_name: Actor to attach.
+        parent_name: Parent actor.
+    """
+    return ue_editor.call_plugin("AttachActor", ChildName=child_name, ParentName=parent_name)
+
+
+@mcp.tool()
+def ue_detach_actor(actor_name: str) -> dict:
+    """
+    Detach an actor from its parent.
+
+    Args:
+        actor_name: Actor to detach.
+    """
+    return ue_editor.call_plugin("DetachActor", ActorName=actor_name)
+
+
+# ---------------------------------------------------------------------------
+# Log / notification tools
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def ue_get_editor_log(count: int = 20, filter: str = "") -> dict:
+    """
+    Get recent editor log messages.
+
+    Args:
+        count: Number of messages. Default 20.
+        filter: Optional text filter.
+    """
+    return ue_editor.call_plugin("GetEditorLog", Count=count, Filter=filter)
+
+
+@mcp.tool()
+def ue_show_notification(message: str, type: str = "info") -> dict:
+    """
+    Show a notification popup in the editor.
+
+    Args:
+        message: Notification text.
+        type: "info", "success", "warning", or "error". Default "info".
+    """
+    return ue_editor.call_plugin("ShowNotification", Message=message, Type=type)
+
+
+# ---------------------------------------------------------------------------
 # Screenshot tools
 # ---------------------------------------------------------------------------
 
