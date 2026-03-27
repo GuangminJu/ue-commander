@@ -778,6 +778,87 @@ def ue_select_actors(actor_names: str = "") -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Blueprint tools
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def ue_create_blueprint(name: str, path: str = "/Game", parent_class: str = "Actor") -> dict:
+    """
+    Create a new Blueprint class.
+
+    Args:
+        name: Blueprint name.
+        path: Package path (e.g. "/Game/Blueprints").
+        parent_class: Parent class (e.g. "Actor", "Pawn", "Character", "PlayerController").
+    """
+    return ue_editor.call_plugin("CreateBlueprint", Name=name, Path=path, ParentClass=parent_class)
+
+
+@mcp.tool()
+def ue_add_blueprint_variable(
+    blueprint_path: str, var_name: str, var_type: str, default_value: str = "",
+) -> dict:
+    """
+    Add a variable to a Blueprint.
+
+    Args:
+        blueprint_path: Asset path of the Blueprint.
+        var_name: Variable name.
+        var_type: Type: "bool", "int", "float", "string", "Vector", "Rotator", "Transform".
+        default_value: Optional default value.
+    """
+    return ue_editor.call_plugin(
+        "AddBlueprintVariable", BlueprintPath=blueprint_path,
+        VarName=var_name, VarType=var_type, DefaultValue=default_value,
+    )
+
+
+@mcp.tool()
+def ue_add_blueprint_node(
+    blueprint_path: str, function_name: str,
+    function_class: str = "", connect_to_event: str = "",
+    node_pos_x: int = 300, node_pos_y: int = 0,
+) -> dict:
+    """
+    Add a function call node to a Blueprint's EventGraph.
+
+    Args:
+        blueprint_path: Asset path of the Blueprint.
+        function_name: Function to call (e.g. "PrintString", "SetActorLocation").
+        function_class: Class owning the function (e.g. "KismetSystemLibrary"). Auto-detected if empty.
+        connect_to_event: Connect exec pin to this event (e.g. "BeginPlay"). Empty = unconnected.
+        node_pos_x/y: Position in graph.
+    """
+    return ue_editor.call_plugin(
+        "AddBlueprintNode", BlueprintPath=blueprint_path,
+        FunctionName=function_name, FunctionClass=function_class,
+        ConnectToEvent=connect_to_event, NodePosX=node_pos_x, NodePosY=node_pos_y,
+    )
+
+
+@mcp.tool()
+def ue_compile_blueprint(blueprint_path: str) -> dict:
+    """
+    Compile a Blueprint.
+
+    Args:
+        blueprint_path: Asset path of the Blueprint.
+    """
+    return ue_editor.call_plugin("CompileBlueprint", BlueprintPath=blueprint_path)
+
+
+@mcp.tool()
+def ue_get_blueprint_info(blueprint_path: str) -> dict:
+    """
+    Get Blueprint info: variables, graphs, nodes, parent class, compile status.
+
+    Args:
+        blueprint_path: Asset path of the Blueprint.
+    """
+    return ue_editor.call_plugin("GetBlueprintInfo", BlueprintPath=blueprint_path)
+
+
+# ---------------------------------------------------------------------------
 # Screenshot tools
 # ---------------------------------------------------------------------------
 
