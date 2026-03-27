@@ -872,6 +872,38 @@ def ue_list_blueprint_nodes(blueprint_path: str, graph_name: str = "") -> dict:
 
 
 @mcp.tool()
+def ue_remove_blueprint_node(blueprint_path: str, node_name: str) -> dict:
+    """
+    Remove a node from a Blueprint graph.
+
+    Args:
+        blueprint_path: Asset path of the Blueprint.
+        node_name: Node name to remove (from ue_list_blueprint_nodes).
+    """
+    return ue_editor.call_plugin("RemoveBlueprintNode", BlueprintPath=blueprint_path, NodeName=node_name)
+
+
+@mcp.tool()
+def ue_add_blueprint_variable_node(
+    blueprint_path: str, var_name: str, setter: bool = False,
+    node_pos_x: int = 0, node_pos_y: int = 0,
+) -> dict:
+    """
+    Add a variable Get or Set node to a Blueprint event graph.
+
+    Args:
+        blueprint_path: Asset path of the Blueprint.
+        var_name: Variable name (must exist in the Blueprint).
+        setter: True for Set node, False for Get node.
+        node_pos_x/y: Position in graph.
+    """
+    return ue_editor.call_plugin(
+        "AddBlueprintVariableNode", BlueprintPath=blueprint_path,
+        VarName=var_name, bSetter=setter, NodePosX=node_pos_x, NodePosY=node_pos_y,
+    )
+
+
+@mcp.tool()
 def ue_set_blueprint_pin_value(
     blueprint_path: str, node_name: str, pin_name: str, value: str,
 ) -> dict:
