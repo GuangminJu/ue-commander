@@ -10,7 +10,7 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 
 from .config import detect_config, find_uproject, BuildConfig, BuildPlatform, BuildTarget
-from . import ue_process, ue_build, ue_discover
+from . import ue_process, ue_build, ue_discover, ue_editor
 
 mcp = FastMCP(
     name="ue-commander",
@@ -353,3 +353,102 @@ def ue_find_projects(drives: list[str] | None = None) -> dict:
         "skipped_copies": skipped,
         "search_method": search_method,
     }
+
+
+# ---------------------------------------------------------------------------
+# Editor UI tools (require OhMyUnrealEngine plugin running in UE)
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def ue_plugin_status() -> dict:
+    """
+    Check if the OhMyUnrealEngine plugin is reachable inside the running editor.
+    Returns the list of available plugin tools if connected.
+    """
+    if not ue_editor.is_plugin_available():
+        return {
+            "ok": False,
+            "error": "Plugin not reachable. Is UE running with OhMyUnrealEngine loaded?",
+        }
+    tools = ue_editor.list_plugin_tools()
+    return {"ok": True, **tools}
+
+
+@mcp.tool()
+def ue_list_windows() -> dict:
+    """
+    List all top-level editor windows (title, size, position).
+    Requires UE editor running with OhMyUnrealEngine plugin.
+    """
+    return ue_editor.call_plugin("ListWindows")
+
+
+@mcp.tool()
+def ue_get_widget_tree(
+    window_index: int = 0,
+    max_depth: int = 3,
+    offset: int = 0,
+    limit: int = 50,
+) -> dict:
+    """
+    Browse the widget tree under a specific editor window.
+    Returns a paginated flat list with depth info.
+
+    Use ue_list_windows first to find the window index.
+    Use offset/limit for pagination — NEVER request the full tree.
+
+    Args:
+        window_index: Window index from ue_list_windows result.
+        max_depth: How deep to traverse. Default 3 (keeps response small).
+        offset: Skip first N widgets (for pagination).
+        limit: Max widgets to return. Default 50, max 200.
+    """
+    return ue_editor.call_plugin(
+        "GetWidgetTree",
+        WindowIndex=window_index,
+        MaxDepth=max_depth,
+        Offset=offset,
+        Limit=limit,
+    )
+
+
+@mcp.tool()
+def ue_search_widgets(query: str, search_type: str = "text", limit: int = 20) -> dict:
+    """
+    Search for widgets across all windows by type name or display text.
+    Much faster than browsing the tree manually.
+
+    Args:
+        query: Search string, e.g. "SButton", "Content Browser", "Details".
+        search_type: "type" to match widget class name, "text" to match display text.
+        limit: Max results. Default 20.
+    """
+    return ue_editor.call_plugin(
+        "SearchWidgets",
+        Query=query,
+        SearchType=search_type,
+        Limit=limit,
+    )
+
+
+@mcp.tool()
+def ue_get_widget_detail(widget_path: str) -> dict:
+    """
+    Get detailed info about a single widget by its path.
+    Path format: "WindowIndex/ChildIndex/ChildIndex/..."
+    (obtained from ue_get_widget_tree or ue_search_widgets results).
+
+    Returns: type, tag, text, position, size, visibility, and a summary
+    of immediate children.
+    """
+    return ue_editor.call_plugin("GetWidgetDetail", WidgetPath=widget_path)
+
+
+@mcp.tool()
+def ue_list_plugin_tools() -> dict:
+    """
+    List all tools available in the OhMyUnrealEngine plugin.
+    These are auto-discovered via UE reflection — any UFUNCTION
+    tagged with meta=(MCP) in UOhMyToolkit is listed here.
+    """
+    return ue_editor.list_plugin_tools()
