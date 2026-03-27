@@ -859,6 +859,19 @@ def ue_get_blueprint_info(blueprint_path: str) -> dict:
 
 
 @mcp.tool()
+def ue_list_blueprint_nodes(blueprint_path: str, graph_name: str = "") -> dict:
+    """
+    List all nodes in a Blueprint graph with their pins and connections.
+    Essential for understanding graph structure before editing.
+
+    Args:
+        blueprint_path: Asset path of the Blueprint.
+        graph_name: Graph name (e.g. "EventGraph"). Empty = first ubergraph.
+    """
+    return ue_editor.call_plugin("ListBlueprintNodes", BlueprintPath=blueprint_path, GraphName=graph_name)
+
+
+@mcp.tool()
 def ue_set_blueprint_pin_value(
     blueprint_path: str, node_name: str, pin_name: str, value: str,
 ) -> dict:
