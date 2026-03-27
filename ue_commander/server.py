@@ -751,3 +751,54 @@ def ue_select_actors(actor_names: str = "") -> dict:
         actor_names: Comma-separated actor names. Empty to deselect all.
     """
     return ue_editor.call_plugin("SelectActors", ActorNames=actor_names)
+
+
+# ---------------------------------------------------------------------------
+# Property tools — reflection-based, works on any UObject
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def ue_list_properties(target: str, offset: int = 0, limit: int = 50) -> dict:
+    """
+    List all properties of any UObject via UE reflection.
+    Works on actors, components, assets — anything.
+
+    Args:
+        target: Actor name, "ActorName.ComponentName", or full object path.
+        offset: Pagination offset.
+        limit: Max properties to return. Default 50.
+    """
+    return ue_editor.call_plugin("ListProperties", Target=target, Offset=offset, Limit=limit)
+
+
+@mcp.tool()
+def ue_get_property(target: str, property_name: str) -> dict:
+    """
+    Get any property value from a UObject via UE reflection.
+    Returns the value in UE text format.
+
+    Args:
+        target: Actor name, "ActorName.ComponentName", or full object path.
+        property_name: Property name (e.g. "RelativeLocation", "Mobility", "bHidden").
+    """
+    return ue_editor.call_plugin("GetProperty", Target=target, PropertyName=property_name)
+
+
+@mcp.tool()
+def ue_set_property(target: str, property_name: str, value: str) -> dict:
+    """
+    Set any property on a UObject via UE reflection.
+    Value uses UE text format (same as editor copy/paste).
+
+    Examples:
+        ue_set_property("SM_Cube16", "RelativeLocation", "(X=100,Y=200,Z=300)")
+        ue_set_property("SM_Cube16", "bHidden", "true")
+        ue_set_property("SM_Cube16.StaticMeshComponent0", "CastShadow", "false")
+        ue_set_property("PointLight1.PointLightComponent0", "Intensity", "5000")
+
+    Args:
+        target: Actor name, "ActorName.ComponentName", or full object path.
+        property_name: Property name.
+        value: New value in UE text format.
+    """
+    return ue_editor.call_plugin("SetProperty", Target=target, PropertyName=property_name, Value=value)
