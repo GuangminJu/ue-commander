@@ -561,3 +561,47 @@ def ue_scroll_widget(widget_path: str, delta: float = 3.0) -> dict:
         delta: Scroll amount. Positive = up, negative = down. Default 3.0.
     """
     return ue_editor.call_plugin("ScrollWidget", WidgetPath=widget_path, Delta=delta)
+
+
+# ---------------------------------------------------------------------------
+# Editor command tools (require OhMyUnrealEngine plugin)
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def ue_exec(command: str) -> dict:
+    """
+    Execute an Unreal Editor console/exec command. Bypasses UI — very powerful.
+    Output is captured and returned.
+
+    Examples: "BUILDLIGHTING", "OBJ LIST", "stat fps", "stat unit",
+              "MAP SAVE", "ACTOR SELECT ALL", etc.
+
+    Args:
+        command: The editor command to execute.
+    """
+    return ue_editor.call_plugin("ExecuteCommand", Command=command)
+
+
+@mcp.tool()
+def ue_cvar(name: str, value: str = "") -> dict:
+    """
+    Get or set a console variable (cvar).
+
+    Args:
+        name: CVar name (e.g. "r.DetailMode", "t.MaxFPS").
+        value: If non-empty, sets the cvar. If empty, reads the current value.
+    """
+    return ue_editor.call_plugin("ConsoleVariable", Name=name, Value=value)
+
+
+@mcp.tool()
+def ue_double_click_widget(widget_path: str, button: str = "left") -> dict:
+    """
+    Simulate a double-click on a widget. Useful for opening assets,
+    expanding tree nodes, etc.
+
+    Args:
+        widget_path: Widget path from ue_get_widget_tree or ue_search_widgets.
+        button: "left", "right", or "middle". Default "left".
+    """
+    return ue_editor.call_plugin("DoubleClickWidget", WidgetPath=widget_path, Button=button)
