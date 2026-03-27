@@ -743,6 +743,30 @@ def ue_delete_actor(actor_name: str) -> dict:
 
 
 @mcp.tool()
+def ue_spawn_actor(
+    class_name: str,
+    label: str = "",
+    location_x: float = 0, location_y: float = 0, location_z: float = 0,
+    rotation_pitch: float = 0, rotation_yaw: float = 0, rotation_roll: float = 0,
+) -> dict:
+    """
+    Spawn a new actor in the current level.
+
+    Args:
+        class_name: Actor class (e.g. "StaticMeshActor", "PointLight", "CameraActor",
+                    "PlayerStart", "TriggerBox", "BlockingVolume").
+        label: Display label for the new actor.
+        location_x/y/z: World position.
+        rotation_pitch/yaw/roll: Rotation in degrees.
+    """
+    return ue_editor.call_plugin(
+        "SpawnActor", ClassName=class_name, Label=label,
+        LocationX=location_x, LocationY=location_y, LocationZ=location_z,
+        RotationPitch=rotation_pitch, RotationYaw=rotation_yaw, RotationRoll=rotation_roll,
+    )
+
+
+@mcp.tool()
 def ue_select_actors(actor_names: str = "") -> dict:
     """
     Select actors in the editor viewport. Empty = deselect all.
