@@ -1,8 +1,13 @@
 """
 UE process management: launch, close, status.
-Key guarantee: only ONE UE editor instance per project.
+
+Key guarantees:
+  1. Only ONE UE editor instance per project.
+  2. Ownership tracking: AI-launched editors can be AI-closed;
+     user-launched editors require explicit user override to close.
 """
 
+import json
 import subprocess
 import time
 from dataclasses import dataclass
@@ -13,6 +18,49 @@ import psutil
 from .config import UEConfig
 
 
+# ---------------------------------------------------------------------------
+# Ownership lock file
+# ---------------------------------------------------------------------------
+
+def _lock_path(cfg: UEConfig) -> Path:
+    """Lock file lives in project Saved/ — ignored by UE and git."""
+    return cfg.project_path.parent / "Saved" / ".ue_commander.lock"
+
+
+def _write_lock(cfg: UEConfig, pid: int) -> None:
+    lock = _lock_path(cfg)
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text(json.dumps({"pid": pid, "launched_by": "ue-commander", "ts": time.time()}))
+
+
+def _read_lock(cfg: UEConfig) -> dict | None:
+    lock = _lock_path(cfg)
+    if not lock.exists():
+        return None
+    try:
+        return json.loads(lock.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _clear_lock(cfg: UEConfig) -> None:
+    lock = _lock_path(cfg)
+    if lock.exists():
+        lock.unlink(missing_ok=True)
+
+
+def _is_ai_launched(cfg: UEConfig, current_pid: int) -> bool:
+    """Check if the currently running UE was launched by ue-commander."""
+    lock = _read_lock(cfg)
+    if lock is None:
+        return False
+    return lock.get("pid") == current_pid
+
+
+# ---------------------------------------------------------------------------
+# Data types
+# ---------------------------------------------------------------------------
+
 @dataclass
 class UEProcessInfo:
     running: bool
@@ -20,7 +68,12 @@ class UEProcessInfo:
     project: str | None = None
     uptime_seconds: float | None = None
     memory_mb: float | None = None
+    launched_by: str | None = None   # "ue-commander" or "user"
 
+
+# ---------------------------------------------------------------------------
+# Process discovery
+# ---------------------------------------------------------------------------
 
 def find_ue_processes(cfg: UEConfig) -> list[psutil.Process]:
     """Return all running UnrealEditor processes, regardless of project."""
@@ -58,12 +111,14 @@ def get_status(cfg: UEConfig) -> UEProcessInfo:
         try:
             mem = proj_proc.memory_info().rss / (1024 * 1024)
             uptime = time.time() - proj_proc.create_time()
+            ai = _is_ai_launched(cfg, proj_proc.pid)
             return UEProcessInfo(
                 running=True,
                 pid=proj_proc.pid,
                 project=cfg.project_name,
                 uptime_seconds=round(uptime),
                 memory_mb=round(mem, 1),
+                launched_by="ue-commander" if ai else "user",
             )
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
@@ -79,10 +134,13 @@ def get_status(cfg: UEConfig) -> UEProcessInfo:
     return UEProcessInfo(running=False)
 
 
+# ---------------------------------------------------------------------------
+# Launch
+# ---------------------------------------------------------------------------
+
 # Default args applied to every editor launch.
 # -auto: auto-accept "modules out of date, rebuild?" dialog (no popup)
 # -skipcompile: don't try editor-internal live compile on startup
-# -log: open log window (useful for diagnostics)
 _DEFAULT_LAUNCH_ARGS = ["-auto", "-skipcompile"]
 
 
@@ -97,19 +155,22 @@ def launch(
     By default, compiles C++ modules BEFORE launching so the editor never
     shows the "modules are missing / out of date" rebuild dialog.
 
+    Writes a lock file so ue-commander knows it owns this process.
     Returns error if an instance is already running (prevents duplicates).
     """
     existing = find_project_ue_process(cfg)
     if existing:
+        ai = _is_ai_launched(cfg, existing.pid)
         return {
             "ok": False,
             "error": f"UE is already running for project '{cfg.project_name}' (PID {existing.pid}). "
+                     f"Launched by: {'ue-commander' if ai else 'user'}. "
                      "Use ue_close first if you need to restart.",
             "pid": existing.pid,
+            "launched_by": "ue-commander" if ai else "user",
         }
 
     # Pre-compile if requested (default: yes)
-    compile_result = None
     if compile_first:
         from .ue_build import compile as ue_compile
         compile_result = ue_compile(cfg)
@@ -139,10 +200,14 @@ def launch(
         creationflags=subprocess.DETACHED_PROCESS if hasattr(subprocess, "DETACHED_PROCESS") else 0,
     )
 
+    # Record ownership
+    _write_lock(cfg, proc.pid)
+
     result = {
         "ok": True,
         "pid": proc.pid,
         "message": f"Launched UnrealEditor for '{cfg.project_name}' (PID {proc.pid}).",
+        "launched_by": "ue-commander",
         "warning": warning,
         "command": " ".join(str(c) for c in cmd),
     }
@@ -151,14 +216,22 @@ def launch(
     return result
 
 
-def close(cfg: UEConfig, force: bool = False, timeout: int = 30) -> dict:
+# ---------------------------------------------------------------------------
+# Close
+# ---------------------------------------------------------------------------
+
+def close(cfg: UEConfig, force: bool = False, timeout: int = 30, user_override: bool = False) -> dict:
     """
     Close UE editor for this project.
-    Tries graceful close first; falls back to terminate if force=True.
+
+    Ownership rules:
+      - AI-launched (lock file matches PID): close is allowed.
+      - User-launched (no lock or PID mismatch): REFUSED unless user_override=True.
+
+    This prevents AI from accidentally closing an editor the user opened.
     """
     proc = find_project_ue_process(cfg)
     if not proc:
-        # Check for any UE processes
         all_procs = find_ue_processes(cfg)
         if all_procs:
             pids = [p.pid for p in all_procs]
@@ -167,19 +240,37 @@ def close(cfg: UEConfig, force: bool = False, timeout: int = 30) -> dict:
                 "error": f"No UE instance found for project '{cfg.project_name}'. "
                          f"Other UE instances exist (PIDs: {pids}) — close them manually if needed.",
             }
+        _clear_lock(cfg)
         return {"ok": True, "message": "No UE process was running."}
 
     pid = proc.pid
+    ai_launched = _is_ai_launched(cfg, pid)
+
+    # Ownership check
+    if not ai_launched and not user_override:
+        return {
+            "ok": False,
+            "error": (
+                f"UE (PID {pid}) was launched by the USER, not by ue-commander. "
+                "AI cannot close a user-launched editor without explicit permission. "
+                "Ask the user to close it, or call ue_close with user_override=true "
+                "if the user has granted permission."
+            ),
+            "launched_by": "user",
+            "pid": pid,
+        }
+
     try:
         if force:
             proc.kill()
-            return {"ok": True, "message": f"Force-killed UE process (PID {pid})."}
+            _clear_lock(cfg)
+            return {"ok": True, "message": f"Force-killed UE process (PID {pid}).", "launched_by": "ue-commander" if ai_launched else "user"}
 
-        # Graceful: send CTRL_CLOSE_EVENT on Windows, SIGTERM elsewhere
         proc.terminate()
         try:
             proc.wait(timeout=timeout)
-            return {"ok": True, "message": f"Closed UE gracefully (PID {pid})."}
+            _clear_lock(cfg)
+            return {"ok": True, "message": f"Closed UE gracefully (PID {pid}).", "launched_by": "ue-commander" if ai_launched else "user"}
         except psutil.TimeoutExpired:
             return {
                 "ok": False,
@@ -187,11 +278,12 @@ def close(cfg: UEConfig, force: bool = False, timeout: int = 30) -> dict:
                          "Call ue_close with force=true to force-kill it.",
             }
     except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
+        _clear_lock(cfg)
         return {"ok": False, "error": str(e)}
 
 
 def close_all_ue(force: bool = False) -> dict:
-    """Close ALL running UE editor instances."""
+    """Close ALL running UE editor instances. Use with caution."""
     killed = []
     errors = []
     for proc in find_ue_processes(None):  # type: ignore[arg-type]

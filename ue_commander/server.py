@@ -58,6 +58,7 @@ def ue_status() -> dict:
             "pid": info.pid,
             "uptime_seconds": info.uptime_seconds,
             "memory_mb": info.memory_mb,
+            "launched_by": info.launched_by,
         })
     if cfg.ide_build:
         result["ide_build_config"] = {
@@ -95,18 +96,28 @@ def ue_launch(
 
 
 @mcp.tool()
-def ue_close(force: bool = False, timeout: int = 30) -> dict:
+def ue_close(force: bool = False, timeout: int = 30, user_override: bool = False) -> dict:
     """
     Close the Unreal Editor for this project.
+
+    Ownership rules:
+      - If the editor was launched by ue_launch (AI), it can be closed freely.
+      - If the editor was launched by the USER (e.g. from Rider, Explorer, or
+        desktop shortcut), this tool REFUSES to close it — the AI must not
+        close what the user opened. Set user_override=true ONLY if the user
+        has explicitly asked you to close their editor.
 
     Args:
         force: If True, immediately kill the process. If False (default),
                sends a graceful close signal and waits up to `timeout` seconds.
         timeout: Seconds to wait for graceful close before reporting failure.
                  Only used when force=False.
+        user_override: Set to True ONLY when the user explicitly asks you to
+                       close their manually-launched editor. Never set this
+                       on your own initiative.
     """
     cfg = _get_cfg()
-    return ue_process.close(cfg, force=force, timeout=timeout)
+    return ue_process.close(cfg, force=force, timeout=timeout, user_override=user_override)
 
 
 @mcp.tool()
