@@ -858,6 +858,121 @@ def ue_get_blueprint_info(blueprint_path: str) -> dict:
     return ue_editor.call_plugin("GetBlueprintInfo", BlueprintPath=blueprint_path)
 
 
+@mcp.tool()
+def ue_set_blueprint_pin_value(
+    blueprint_path: str, node_name: str, pin_name: str, value: str,
+) -> dict:
+    """
+    Set a default value on a Blueprint node pin.
+
+    Args:
+        blueprint_path: Asset path of the Blueprint.
+        node_name: Node name (from ue_add_blueprint_node result).
+        pin_name: Pin name (from the node's pins list).
+        value: Default value as string.
+    """
+    return ue_editor.call_plugin(
+        "SetBlueprintPinValue", BlueprintPath=blueprint_path,
+        NodeName=node_name, PinName=pin_name, Value=value,
+    )
+
+
+@mcp.tool()
+def ue_connect_blueprint_pins(
+    blueprint_path: str,
+    source_node: str, source_pin: str,
+    target_node: str, target_pin: str,
+) -> dict:
+    """
+    Connect two pins between Blueprint nodes.
+
+    Args:
+        blueprint_path: Asset path of the Blueprint.
+        source_node: Source node name.
+        source_pin: Source pin name.
+        target_node: Target node name.
+        target_pin: Target pin name.
+    """
+    return ue_editor.call_plugin(
+        "ConnectBlueprintPins", BlueprintPath=blueprint_path,
+        SourceNodeName=source_node, SourcePinName=source_pin,
+        TargetNodeName=target_node, TargetPinName=target_pin,
+    )
+
+
+# ---------------------------------------------------------------------------
+# PIE (Play In Editor) tools
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def ue_start_pie() -> dict:
+    """Start Play In Editor — run the game in the editor viewport."""
+    return ue_editor.call_plugin("StartPIE")
+
+
+@mcp.tool()
+def ue_stop_pie() -> dict:
+    """Stop Play In Editor."""
+    return ue_editor.call_plugin("StopPIE")
+
+
+@mcp.tool()
+def ue_pie_status() -> dict:
+    """Check if Play In Editor is running (and if paused)."""
+    return ue_editor.call_plugin("GetPIEStatus")
+
+
+# ---------------------------------------------------------------------------
+# Viewport camera tools
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def ue_get_viewport_camera() -> dict:
+    """Get the editor viewport camera position and rotation."""
+    return ue_editor.call_plugin("GetViewportCamera")
+
+
+@mcp.tool()
+def ue_set_viewport_camera(
+    location_x: float = 0, location_y: float = 0, location_z: float = 0,
+    rotation_pitch: float = 0, rotation_yaw: float = 0, rotation_roll: float = 0,
+) -> dict:
+    """
+    Set the editor viewport camera position and rotation.
+
+    Args:
+        location_x/y/z: Camera world position.
+        rotation_pitch/yaw/roll: Camera rotation in degrees.
+    """
+    return ue_editor.call_plugin(
+        "SetViewportCamera",
+        LocationX=location_x, LocationY=location_y, LocationZ=location_z,
+        RotationPitch=rotation_pitch, RotationYaw=rotation_yaw, RotationRoll=rotation_roll,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Editor utility tools
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def ue_undo() -> dict:
+    """Undo the last editor action."""
+    return ue_editor.call_plugin("Undo")
+
+
+@mcp.tool()
+def ue_redo() -> dict:
+    """Redo the last undone action."""
+    return ue_editor.call_plugin("Redo")
+
+
+@mcp.tool()
+def ue_save_all() -> dict:
+    """Save all modified assets and levels."""
+    return ue_editor.call_plugin("SaveAll")
+
+
 # ---------------------------------------------------------------------------
 # Screenshot tools
 # ---------------------------------------------------------------------------
