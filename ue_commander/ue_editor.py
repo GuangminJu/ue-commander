@@ -13,8 +13,6 @@ from typing import Any
 
 DEFAULT_PORT = 9090
 DEFAULT_TIMEOUT = 10  # seconds
-# Longer timeout for interaction calls — some may trigger UI changes that take time
-INTERACTION_TIMEOUT = 15
 
 
 def _get_crash_file_path() -> Path | None:
@@ -73,9 +71,8 @@ def call_plugin(function_name: str, port: int = DEFAULT_PORT, timeout: int = DEF
                 return json.loads(body)
             except json.JSONDecodeError:
                 return {"raw": body}
-    except (socket.timeout, TimeoutError, ConnectionRefusedError,
-            ConnectionResetError, urllib.error.URLError, OSError) as e:
-        # Connection lost — check if UE wrote a crash file
+    except (socket.timeout, TimeoutError) as e:
+        # Timeout — check crash file first, then probe once
         crash = read_crash_info()
         if crash is not None:
             return {
@@ -83,18 +80,31 @@ def call_plugin(function_name: str, port: int = DEFAULT_PORT, timeout: int = DEF
                 "crashed": True,
                 "crash_info": crash,
             }
-        # No crash file — might be a timeout or UE is still starting
-        alive = is_plugin_available(port=port)
-        if not alive:
+        # No crash file — probe once to distinguish hang from crash
+        if is_plugin_available(port=port):
             return {
-                "error": "UE editor appears to have crashed or become unresponsive. "
-                         "No crash file found — check Saved/Crashes/ for details.",
-                "crashed": True,
+                "error": f"Request to {function_name} timed out after {timeout}s, "
+                         "but UE is still running.",
+                "crashed": False,
             }
         return {
-            "error": f"Request to {function_name} timed out after {timeout}s, "
-                     "but UE is still running.",
-            "crashed": False,
+            "error": "UE editor appears to have crashed or become unresponsive.",
+            "crashed": True,
+        }
+    except (ConnectionRefusedError, ConnectionResetError,
+            urllib.error.URLError, OSError) as e:
+        # Connection refused/reset — UE is likely down, check crash file
+        crash = read_crash_info()
+        if crash is not None:
+            return {
+                "error": "UE editor crashed during MCP operation.",
+                "crashed": True,
+                "crash_info": crash,
+            }
+        return {
+            "error": f"Cannot connect to UE plugin. "
+                     "Is the editor running with OhMyUnrealEngine loaded?",
+            "crashed": True,
         }
     except Exception as e:
         return {"error": str(e)}
