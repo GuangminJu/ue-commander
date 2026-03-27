@@ -974,6 +974,55 @@ def ue_save_all() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Level tools
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def ue_get_current_level() -> dict:
+    """Get info about the current level (name, actor count)."""
+    return ue_editor.call_plugin("GetCurrentLevel")
+
+
+@mcp.tool()
+def ue_load_level(level_path: str) -> dict:
+    """
+    Load a level by content path.
+
+    Args:
+        level_path: Content path (e.g. "/Game/Maps/MyMap").
+    """
+    return ue_editor.call_plugin("LoadLevel", LevelPath=level_path)
+
+
+@mcp.tool()
+def ue_new_level(level_path: str = "/Game/Maps/NewLevel") -> dict:
+    """
+    Create a new empty level.
+
+    Args:
+        level_path: Desired content path for the new level.
+    """
+    return ue_editor.call_plugin("NewLevel", LevelPath=level_path)
+
+
+# ---------------------------------------------------------------------------
+# Import tools
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def ue_import_asset(file_path: str, dest_path: str = "/Game", dest_name: str = "") -> dict:
+    """
+    Import an external file as a UE asset (FBX, PNG, WAV, etc.).
+
+    Args:
+        file_path: Absolute path to the file on disk.
+        dest_path: Destination content path (e.g. "/Game/Meshes").
+        dest_name: Optional asset name. Auto-derived from filename if empty.
+    """
+    return ue_editor.call_plugin("ImportAsset", FilePath=file_path, DestPath=dest_path, DestName=dest_name)
+
+
+# ---------------------------------------------------------------------------
 # Screenshot tools
 # ---------------------------------------------------------------------------
 
