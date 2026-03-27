@@ -70,9 +70,16 @@ def ue_status() -> dict:
 
 
 @mcp.tool()
-def ue_launch(extra_args: list[str] | None = None) -> dict:
+def ue_launch(
+    extra_args: list[str] | None = None,
+    compile_first: bool = True,
+) -> dict:
     """
     Launch the Unreal Editor for this project.
+
+    By default, compiles C++ modules first so the editor never shows a
+    "modules out of date — rebuild?" dialog. Also passes -auto and
+    -skipcompile flags to suppress any remaining startup prompts.
 
     Safety: returns an error (does NOT launch) if the editor is already running,
     preventing duplicate instances.
@@ -80,9 +87,11 @@ def ue_launch(extra_args: list[str] | None = None) -> dict:
     Args:
         extra_args: Optional additional arguments passed to UnrealEditor.exe,
                     e.g. ["-log", "-game"]. Leave empty for normal editor launch.
+        compile_first: If True (default), run UBT compile before launching.
+                       Set to False only when you know modules are up to date.
     """
     cfg = _get_cfg()
-    return ue_process.launch(cfg, extra_args=extra_args)
+    return ue_process.launch(cfg, extra_args=extra_args, compile_first=compile_first)
 
 
 @mcp.tool()

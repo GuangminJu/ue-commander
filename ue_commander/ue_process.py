@@ -79,9 +79,24 @@ def get_status(cfg: UEConfig) -> UEProcessInfo:
     return UEProcessInfo(running=False)
 
 
-def launch(cfg: UEConfig, extra_args: list[str] | None = None) -> dict:
+# Default args applied to every editor launch.
+# -auto: auto-accept "modules out of date, rebuild?" dialog (no popup)
+# -skipcompile: don't try editor-internal live compile on startup
+# -log: open log window (useful for diagnostics)
+_DEFAULT_LAUNCH_ARGS = ["-auto", "-skipcompile"]
+
+
+def launch(
+    cfg: UEConfig,
+    extra_args: list[str] | None = None,
+    compile_first: bool = True,
+) -> dict:
     """
     Launch UE editor for this project.
+
+    By default, compiles C++ modules BEFORE launching so the editor never
+    shows the "modules are missing / out of date" rebuild dialog.
+
     Returns error if an instance is already running (prevents duplicates).
     """
     existing = find_project_ue_process(cfg)
@@ -93,6 +108,19 @@ def launch(cfg: UEConfig, extra_args: list[str] | None = None) -> dict:
             "pid": existing.pid,
         }
 
+    # Pre-compile if requested (default: yes)
+    compile_result = None
+    if compile_first:
+        from .ue_build import compile as ue_compile
+        compile_result = ue_compile(cfg)
+        if not compile_result.ok:
+            return {
+                "ok": False,
+                "error": "Pre-launch compile failed. Fix errors before launching the editor.",
+                "compile_errors": compile_result.errors[:10],
+                "output_tail": compile_result.output_tail,
+            }
+
     other_ue = find_ue_processes(cfg)
     warning = None
     if other_ue:
@@ -100,6 +128,7 @@ def launch(cfg: UEConfig, extra_args: list[str] | None = None) -> dict:
         warning = f"Other UE instances are running (PIDs: {pids}). Launching for this project anyway."
 
     cmd = [str(cfg.editor_exe), str(cfg.project_path)]
+    cmd.extend(_DEFAULT_LAUNCH_ARGS)
     if extra_args:
         cmd.extend(extra_args)
 
@@ -110,13 +139,16 @@ def launch(cfg: UEConfig, extra_args: list[str] | None = None) -> dict:
         creationflags=subprocess.DETACHED_PROCESS if hasattr(subprocess, "DETACHED_PROCESS") else 0,
     )
 
-    return {
+    result = {
         "ok": True,
         "pid": proc.pid,
         "message": f"Launched UnrealEditor for '{cfg.project_name}' (PID {proc.pid}).",
         "warning": warning,
         "command": " ".join(str(c) for c in cmd),
     }
+    if compile_first:
+        result["pre_compiled"] = True
+    return result
 
 
 def close(cfg: UEConfig, force: bool = False, timeout: int = 30) -> dict:
