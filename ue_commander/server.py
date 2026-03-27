@@ -605,3 +605,149 @@ def ue_double_click_widget(widget_path: str, button: str = "left") -> dict:
         button: "left", "right", or "middle". Default "left".
     """
     return ue_editor.call_plugin("DoubleClickWidget", WidgetPath=widget_path, Button=button)
+
+
+# ---------------------------------------------------------------------------
+# Asset tools (require OhMyUnrealEngine plugin)
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def ue_list_assets(
+    path: str = "/Game",
+    filter: str = "",
+    recursive: bool = False,
+    offset: int = 0,
+    limit: int = 50,
+) -> dict:
+    """
+    List assets in a content directory with optional class filter.
+    Returns paginated results.
+
+    Args:
+        path: Content path (e.g. "/Game", "/Game/Maps", "/Game/Blueprints").
+        filter: Optional class filter (e.g. "Blueprint", "StaticMesh", "Material").
+        recursive: Search subdirectories. Default False.
+        offset: Pagination offset.
+        limit: Max results. Default 50.
+    """
+    return ue_editor.call_plugin(
+        "ListAssets", Path=path, Filter=filter,
+        Recursive=recursive, Offset=offset, Limit=limit,
+    )
+
+
+@mcp.tool()
+def ue_get_asset_info(asset_path: str) -> dict:
+    """
+    Get detailed information about a specific asset (class, tags, etc.).
+
+    Args:
+        asset_path: Full asset path (e.g. "/Game/Maps/MyMap.MyMap").
+    """
+    return ue_editor.call_plugin("GetAssetInfo", AssetPath=asset_path)
+
+
+@mcp.tool()
+def ue_delete_asset(asset_path: str) -> dict:
+    """
+    Delete an asset. Use with caution — this is irreversible.
+
+    Args:
+        asset_path: Full path to asset (e.g. "/Game/Blueprints/MyBP").
+    """
+    return ue_editor.call_plugin("DeleteAsset", AssetPath=asset_path)
+
+
+@mcp.tool()
+def ue_duplicate_asset(source_path: str, dest_name: str, dest_path: str) -> dict:
+    """
+    Duplicate an asset to a new location.
+
+    Args:
+        source_path: Source asset path.
+        dest_name: Name for the new asset.
+        dest_path: Destination package path (e.g. "/Game/NewFolder").
+    """
+    return ue_editor.call_plugin(
+        "DuplicateAsset", SourcePath=source_path, DestName=dest_name, DestPath=dest_path,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Actor tools (require OhMyUnrealEngine plugin)
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def ue_list_actors(
+    class_filter: str = "",
+    name_filter: str = "",
+    limit: int = 50,
+) -> dict:
+    """
+    List actors in the current editor level.
+
+    Args:
+        class_filter: Optional class name filter (e.g. "StaticMeshActor", "PointLight").
+        name_filter: Optional substring match on actor name or label.
+        limit: Max results. Default 50.
+    """
+    return ue_editor.call_plugin(
+        "ListActors", ClassFilter=class_filter, NameFilter=name_filter, Limit=limit,
+    )
+
+
+@mcp.tool()
+def ue_get_actor_info(actor_name: str) -> dict:
+    """
+    Get detailed info about an actor (transform, components, tags).
+
+    Args:
+        actor_name: Actor name or label from ue_list_actors.
+    """
+    return ue_editor.call_plugin("GetActorInfo", ActorName=actor_name)
+
+
+@mcp.tool()
+def ue_set_actor_transform(
+    actor_name: str,
+    location_x: float = 0, location_y: float = 0, location_z: float = 0,
+    rotation_pitch: float = 0, rotation_yaw: float = 0, rotation_roll: float = 0,
+    scale_x: float = 1, scale_y: float = 1, scale_z: float = 1,
+) -> dict:
+    """
+    Set an actor's location, rotation, and scale.
+
+    Args:
+        actor_name: Actor name or label.
+        location_x/y/z: World position.
+        rotation_pitch/yaw/roll: Rotation in degrees.
+        scale_x/y/z: Scale factors. Default 1.
+    """
+    return ue_editor.call_plugin(
+        "SetActorTransform", ActorName=actor_name,
+        LocationX=location_x, LocationY=location_y, LocationZ=location_z,
+        RotationPitch=rotation_pitch, RotationYaw=rotation_yaw, RotationRoll=rotation_roll,
+        ScaleX=scale_x, ScaleY=scale_y, ScaleZ=scale_z,
+    )
+
+
+@mcp.tool()
+def ue_delete_actor(actor_name: str) -> dict:
+    """
+    Delete an actor from the current level.
+
+    Args:
+        actor_name: Actor name or label.
+    """
+    return ue_editor.call_plugin("DeleteActor", ActorName=actor_name)
+
+
+@mcp.tool()
+def ue_select_actors(actor_names: str = "") -> dict:
+    """
+    Select actors in the editor viewport. Empty = deselect all.
+
+    Args:
+        actor_names: Comma-separated actor names. Empty to deselect all.
+    """
+    return ue_editor.call_plugin("SelectActors", ActorNames=actor_names)
