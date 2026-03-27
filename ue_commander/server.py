@@ -1068,6 +1068,26 @@ def ue_import_asset(file_path: str, dest_path: str = "/Game", dest_name: str = "
 
 
 # ---------------------------------------------------------------------------
+# Python scripting
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def ue_run_python(code: str) -> dict:
+    """
+    Execute Python code inside the UE editor. Requires PythonScriptPlugin.
+    This is the ultimate escape hatch — any UE operation expressible in Python
+    can be done through this tool.
+
+    Example:
+        ue_run_python("import unreal; print(unreal.EditorAssetLibrary.list_assets('/Game/'))")
+
+    Args:
+        code: Python code to execute. Can be multi-line.
+    """
+    return ue_editor.call_plugin("RunPython", Code=code)
+
+
+# ---------------------------------------------------------------------------
 # Component tools
 # ---------------------------------------------------------------------------
 
