@@ -778,6 +778,23 @@ def ue_select_actors(actor_names: str = "") -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Screenshot tools
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def ue_screenshot(widget_path: str = "0", filename: str = "") -> dict:
+    """
+    Take a screenshot of a widget or the main editor window.
+    Saves to Saved/Screenshots/ as PNG and returns the file path.
+
+    Args:
+        widget_path: Widget path to capture. "0" = main window (default).
+        filename: Output filename (auto-generated if empty).
+    """
+    return ue_editor.call_plugin("TakeScreenshot", WidgetPath=widget_path, Filename=filename)
+
+
+# ---------------------------------------------------------------------------
 # Property tools — reflection-based, works on any UObject
 # ---------------------------------------------------------------------------
 
