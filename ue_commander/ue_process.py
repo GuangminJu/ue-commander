@@ -7,6 +7,7 @@ Key guarantees:
      user-launched editors require explicit user override to close.
 """
 
+import asyncio
 import json
 import subprocess
 import time
@@ -139,21 +140,26 @@ def get_status(cfg: UEConfig) -> UEProcessInfo:
 # ---------------------------------------------------------------------------
 
 # Default args applied to every editor launch.
-# -auto: auto-accept "modules out of date, rebuild?" dialog (no popup)
 # -skipcompile: don't try editor-internal live compile on startup
-_DEFAULT_LAUNCH_ARGS = ["-auto", "-skipcompile"]
+_DEFAULT_LAUNCH_ARGS = ["-skipcompile"]
 
 
-def launch(
+async def launch(
     cfg: UEConfig,
     extra_args: list[str] | None = None,
     compile_first: bool = True,
+    wait_ready: bool = True,
+    ready_timeout: int = 180,
+    ctx=None,
 ) -> dict:
     """
     Launch UE editor for this project.
 
     By default, compiles C++ modules BEFORE launching so the editor never
     shows the "modules are missing / out of date" rebuild dialog.
+
+    After launching, polls the plugin HTTP endpoint until the editor is
+    fully loaded and ready to accept commands (up to ready_timeout seconds).
 
     Writes a lock file so ue-commander knows it owns this process.
     Returns error if an instance is already running (prevents duplicates).
@@ -173,7 +179,7 @@ def launch(
     # Pre-compile if requested (default: yes)
     if compile_first:
         from .ue_build import compile as ue_compile
-        compile_result = ue_compile(cfg)
+        compile_result = await ue_compile(cfg, ctx=ctx)
         if not compile_result.ok:
             return {
                 "ok": False,
@@ -193,11 +199,13 @@ def launch(
     if extra_args:
         cmd.extend(extra_args)
 
+    # Launch without DETACHED_PROCESS or DEVNULL — these cause UE to stall
+    # during Python/shader init on Windows. Use CREATE_NEW_PROCESS_GROUP
+    # so the child doesn't share our console signal handlers, but still
+    # inherits a normal console environment.
     proc = subprocess.Popen(
         cmd,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        creationflags=subprocess.DETACHED_PROCESS if hasattr(subprocess, "DETACHED_PROCESS") else 0,
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP") else 0,
     )
 
     # Record ownership
@@ -213,6 +221,59 @@ def launch(
     }
     if compile_first:
         result["pre_compiled"] = True
+
+    # Wait for editor to be fully ready (plugin HTTP endpoint responding)
+    if wait_ready:
+        from . import ue_editor
+        ready = False
+        start = time.time()
+        poll_interval = 3  # seconds between probes
+        if ctx:
+            await ctx.info(f"Editor process started (PID {proc.pid}). Waiting for it to finish loading...")
+            await ctx.report_progress(0, ready_timeout, "Editor loading...")
+
+        while time.time() - start < ready_timeout:
+            # Check process is still alive
+            if not psutil.pid_exists(proc.pid):
+                result["ok"] = False
+                result["error"] = (
+                    f"Editor process (PID {proc.pid}) exited unexpectedly during startup. "
+                    "Check logs with ue_get_log for details."
+                )
+                result["phase"] = "crashed_during_startup"
+                return result
+
+            if ue_editor.is_plugin_available():
+                ready = True
+                break
+
+            elapsed = int(time.time() - start)
+            if ctx:
+                await ctx.report_progress(elapsed, ready_timeout, f"Editor loading... ({elapsed}s)")
+            await asyncio.sleep(poll_interval)
+
+        elapsed = round(time.time() - start, 1)
+        if ready:
+            result["phase"] = "ready"
+            result["startup_time_seconds"] = elapsed
+            result["message"] = (
+                f"Editor launched and ready (PID {proc.pid}). "
+                f"Startup took {elapsed}s."
+            )
+            if ctx:
+                await ctx.info(f"Editor ready! Startup took {elapsed}s.")
+        else:
+            result["phase"] = "loading"
+            result["message"] = (
+                f"Editor launched (PID {proc.pid}) but plugin did not respond "
+                f"within {ready_timeout}s. Editor may still be loading. "
+                "Use ue_status to check later."
+            )
+            if ctx:
+                await ctx.info(f"Editor still loading after {ready_timeout}s timeout. Use ue_status to check.")
+    else:
+        result["phase"] = "launched"
+
     return result
 
 

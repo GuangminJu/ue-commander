@@ -3,12 +3,19 @@ UE build and compile management.
 Wraps UnrealBuildTool (UBT) with correct arguments so AI never gets them wrong.
 """
 
+import asyncio
 import re
 import subprocess
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol
+
+
+class ProgressReporter(Protocol):
+    """Callback for reporting build progress (compatible with MCP Context)."""
+    async def report_progress(self, progress: float, total: float | None = None, message: str | None = None) -> None: ...
+    async def info(self, message: str) -> None: ...
 
 from .config import UEConfig
 from .ue_process import find_project_ue_process
@@ -44,13 +51,14 @@ def _parse_output(lines: list[str]) -> tuple[list[str], list[str]]:
     return errors, warnings
 
 
-def compile(
+async def compile(
     cfg: UEConfig,
     target: BuildTarget = "Editor",
     config: BuildConfig = "Development",
     platform: BuildPlatform = "Win64",
     timeout: int = 600,
     live_output_lines: int = 40,
+    ctx: ProgressReporter | None = None,
 ) -> BuildResult:
     """
     Compile the project's C++ code using UnrealBuildTool.
@@ -69,40 +77,69 @@ def compile(
         )
 
     target_name = f"{cfg.project_name}{target}" if target != "Game" else cfg.project_name
+    # Escaped quotes around project path (matches Rider's format)
+    project_escaped = f'\\"{cfg.project_path}\\"'
 
-    cmd = [
-        str(cfg.build_bat),
-        target_name,
-        platform,
-        config,
-        str(cfg.project_path),
-        "-WaitMutex",       # Wait if another UBT is running (no crash)
-        "-FromMsBuild",     # Structured output
+    # Use Rider-style -Target= syntax (modern UBT format)
+    # Primary target: the project editor/game
+    primary_target = f'{target_name} {platform} {config} -Project={project_escaped}'
+    # ShaderCompileWorker: always needed alongside editor builds
+    scw_target = f'ShaderCompileWorker {platform} Development -Project={project_escaped} -Quiet'
+
+    # Map platform to architecture flag
+    arch_map = {"Win64": "x64", "Win32": "x86"}
+    arch = arch_map.get(platform, "")
+
+    # Build the full command line string with correct quoting for cmd.exe
+    # -Target= values contain spaces and embedded quotes, so we must
+    # construct the string exactly as Rider does on the command line.
+    bat = str(cfg.build_bat)
+    parts = [
+        f'"{bat}"' if " " in bat else bat,
+        f'-Target="{primary_target}"',
+        f'-Target="{scw_target}"',
+        "-WaitMutex",
+        "-FromMsBuild",
     ]
-    command_str = " ".join(f'"{c}"' if " " in str(c) else str(c) for c in cmd)
+    if arch:
+        parts.append(f"-architecture={arch}")
+    command_str = " ".join(parts)
+
+    if ctx:
+        await ctx.info(f"Starting compilation: {target_name} {config} {platform}")
+        await ctx.report_progress(0, 100, "Compiling...")
 
     all_lines: list[str] = []
-    lock = threading.Lock()
 
     try:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
+        # Use shell mode so cmd.exe parses the quoting correctly
+        proc = await asyncio.create_subprocess_shell(
+            command_str,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
         )
 
         assert proc.stdout is not None
-        for line in proc.stdout:
-            with lock:
-                all_lines.append(line)
+        compile_re = re.compile(r"\[(\d+)/(\d+)\]")
+        last_pct = -1
 
-        proc.wait(timeout=timeout)
-        rc = proc.returncode
+        async for raw_line in proc.stdout:
+            line = raw_line.decode("utf-8", errors="replace")
+            all_lines.append(line)
 
-    except subprocess.TimeoutExpired:
+            # Report progress from UBT's [N/Total] markers
+            if ctx:
+                m = compile_re.search(line)
+                if m:
+                    current, total = int(m.group(1)), int(m.group(2))
+                    pct = int(current * 100 / total) if total > 0 else 0
+                    if pct > last_pct:
+                        last_pct = pct
+                        await ctx.report_progress(current, total, f"Compiling [{current}/{total}]")
+
+        rc = await asyncio.wait_for(proc.wait(), timeout=timeout)
+
+    except asyncio.TimeoutError:
         proc.kill()
         return BuildResult(
             ok=False,
@@ -120,14 +157,21 @@ def compile(
         )
 
     errors, warnings = _parse_output(all_lines)
-    tail = "\n".join(all_lines[-live_output_lines:])
+    # Return full output so callers can see the complete build log (like Rider's Build Output)
+    full_output = "".join(all_lines)
+
+    if ctx:
+        if rc == 0:
+            await ctx.info(f"Compilation succeeded ({len(warnings)} warnings)")
+        else:
+            await ctx.info(f"Compilation FAILED ({len(errors)} errors)")
 
     return BuildResult(
         ok=(rc == 0),
         return_code=rc,
         errors=errors[:20],    # Cap to avoid flooding context
         warnings=warnings[:10],
-        output_tail=tail,
+        output_tail=full_output,
         command=command_str,
     )
 

@@ -237,11 +237,17 @@ def _detect_rider_config(project_root: Path, project_name: str) -> IDEBuildConfi
         if active_cfg is None:
             return None
 
-        # Extract CONFIGURATION and PLATFORM options
+        # Extract CONFIGURATION and PLATFORM from the highest-numbered
+        # configuration_N block — Rider uses the last one as the active config.
         raw_config = "Development_Editor"
         raw_platform = "x64"
-        for cfg_block in active_cfg.findall("configuration_1"):
-            for opt in cfg_block.findall("option"):
+        last_cfg_block = None
+        for child in active_cfg:
+            tag = child.tag or ""
+            if tag.startswith("configuration_"):
+                last_cfg_block = child
+        if last_cfg_block is not None:
+            for opt in last_cfg_block.findall("option"):
                 name = opt.get("name", "")
                 val = opt.get("value", "")
                 if name == "CONFIGURATION":
@@ -359,13 +365,23 @@ def detect_config(uproject_path: Path) -> UEConfig:
             "  3. Install UE via Epic Games Launcher"
         )
 
-    editor_exe = engine_path / "Engine/Binaries/Win64/UnrealEditor.exe"
     build_bat = engine_path / "Engine/Build/BatchFiles/Build.bat"
+    ide_build = detect_ide_build_config(project_root, project_name)
+
+    # Pick the correct editor exe based on build config.
+    # Development → UnrealEditor.exe
+    # Other configs → UnrealEditor-{Platform}-{Config}.exe
+    bin_dir = engine_path / "Engine/Binaries/Win64"
+    if ide_build and ide_build.config != "Development":
+        editor_exe = bin_dir / f"UnrealEditor-{ide_build.platform}-{ide_build.config}.exe"
+        if not editor_exe.exists():
+            # Fallback to default
+            editor_exe = bin_dir / "UnrealEditor.exe"
+    else:
+        editor_exe = bin_dir / "UnrealEditor.exe"
 
     if not editor_exe.exists():
-        raise RuntimeError(f"UnrealEditor.exe not found: {editor_exe}")
-
-    ide_build = detect_ide_build_config(project_root, project_name)
+        raise RuntimeError(f"Editor executable not found: {editor_exe}")
 
     return UEConfig(
         engine_path=engine_path,

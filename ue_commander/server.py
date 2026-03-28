@@ -7,7 +7,7 @@ Every operation goes through this server, which uses the detected config.
 
 from pathlib import Path
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 
 from .config import detect_config, find_uproject, BuildConfig, BuildPlatform, BuildTarget
 from . import ue_process, ue_build, ue_discover, ue_editor
@@ -44,7 +44,8 @@ def ue_status() -> dict:
     """
     Check whether Unreal Editor is currently running for this project.
     Returns process info (PID, memory, uptime) if running.
-    Also reports the detected IDE build configuration.
+    Also probes the plugin HTTP endpoint to report whether the editor
+    is fully loaded and ready to accept commands (plugin_ready field).
     """
     cfg = _get_cfg()
     info = ue_process.get_status(cfg)
@@ -54,12 +55,18 @@ def ue_status() -> dict:
         "editor_running": info.running,
     }
     if info.running:
+        plugin_ready = ue_editor.is_plugin_available()
+        phase = "ready" if plugin_ready else "loading"
         result.update({
             "pid": info.pid,
             "uptime_seconds": info.uptime_seconds,
             "memory_mb": info.memory_mb,
             "launched_by": info.launched_by,
+            "plugin_ready": plugin_ready,
+            "phase": phase,
         })
+    else:
+        result["phase"] = "not_running"
     if cfg.ide_build:
         result["ide_build_config"] = {
             "config": cfg.ide_build.config,
@@ -71,16 +78,23 @@ def ue_status() -> dict:
 
 
 @mcp.tool()
-def ue_launch(
+async def ue_launch(
     extra_args: list[str] | None = None,
-    compile_first: bool = True,
+    compile_first: bool = False,
+    wait_ready: bool = False,
+    ready_timeout: int = 180,
+    ctx: Context | None = None,
 ) -> dict:
     """
     Launch the Unreal Editor for this project.
 
-    By default, compiles C++ modules first so the editor never shows a
-    "modules out of date — rebuild?" dialog. Also passes -auto and
-    -skipcompile flags to suppress any remaining startup prompts.
+    Passes -auto and -skipcompile flags to suppress startup prompts.
+    Call ue_compile BEFORE this if you changed C++ code.
+
+    After launching, waits for the editor to fully load by polling the
+    plugin HTTP endpoint. The response includes:
+      - phase: "ready" (plugin responding), "loading" (timed out), or "crashed_during_startup"
+      - startup_time_seconds: how long it took to become ready
 
     Safety: returns an error (does NOT launch) if the editor is already running,
     preventing duplicate instances.
@@ -88,11 +102,17 @@ def ue_launch(
     Args:
         extra_args: Optional additional arguments passed to UnrealEditor.exe,
                     e.g. ["-log", "-game"]. Leave empty for normal editor launch.
-        compile_first: If True (default), run UBT compile before launching.
-                       Set to False only when you know modules are up to date.
+        compile_first: If True, run UBT compile before launching (slow, blocks for minutes).
+                       Default False — call ue_compile separately for better progress feedback.
+        wait_ready: If True (default), wait for the plugin HTTP endpoint to respond
+                    before returning. Set False for fire-and-forget.
+        ready_timeout: Max seconds to wait for editor readiness. Default 180 (3 min).
     """
     cfg = _get_cfg()
-    return ue_process.launch(cfg, extra_args=extra_args, compile_first=compile_first)
+    return await ue_process.launch(
+        cfg, extra_args=extra_args, compile_first=compile_first,
+        wait_ready=wait_ready, ready_timeout=ready_timeout, ctx=ctx,
+    )
 
 
 @mcp.tool()
@@ -133,11 +153,12 @@ def ue_close_all(force: bool = False) -> dict:
 
 
 @mcp.tool()
-def ue_compile(
+async def ue_compile(
     config: BuildConfig | None = None,
     target: BuildTarget | None = None,
     platform: BuildPlatform | None = None,
     timeout: int = 600,
+    ctx: Context | None = None,
 ) -> dict:
     """
     Compile the project's C++ code using UnrealBuildTool.
@@ -166,12 +187,13 @@ def ue_compile(
     resolved_target: BuildTarget = target or (ide.target if ide else "Editor")
     resolved_platform: BuildPlatform = platform or (ide.platform if ide else "Win64")
 
-    result = ue_build.compile(
+    result = await ue_build.compile(
         cfg,
         config=resolved_config,
         target=resolved_target,
         platform=resolved_platform,
         timeout=timeout,
+        ctx=ctx,
     )
 
     return {
@@ -186,7 +208,7 @@ def ue_compile(
         "warning_count": len(result.warnings),
         "errors": result.errors,
         "warnings": result.warnings,
-        "output_tail": result.output_tail,
+        "build_output": result.output_tail,
     }
 
 
