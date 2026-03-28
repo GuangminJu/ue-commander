@@ -111,10 +111,10 @@ async def main():
     else:
         print(f"{R}❌ {B}{tgt}{X} {_bar(last_pct)} {R}{B}FAILED{X} {D}{_time(elapsed)}{X}")
         for e in errors[:6]:
-            print(f"  {R}●{X} {e[:140]}")
+            print(f"  {R}●{X} {e}")
         if not errors:
             for ln in lines[-4:]:
-                print(f"  {D}{ln[:140]}{X}")
+                print(f"  {D}{ln}{X}")
 
     return rc
 
