@@ -927,6 +927,72 @@ def ue_add_blueprint_variable_node(
 
 
 @mcp.tool()
+def ue_add_blueprint_cast_node(
+    blueprint_path: str, target_class: str, pure: bool = False,
+    node_pos_x: int = 0, node_pos_y: int = 0,
+) -> dict:
+    """
+    Add a Cast To node to a Blueprint graph.
+
+    Args:
+        blueprint_path: Asset path of the Blueprint.
+        target_class: Class to cast to (e.g. "ShooterCharacter", "Pawn").
+        pure: Pure cast (no exec pins). Default False.
+        node_pos_x/y: Position in graph.
+    """
+    return ue_editor.call_plugin(
+        "AddBlueprintCastNode", BlueprintPath=blueprint_path,
+        TargetClass=target_class, bPure=pure,
+        NodePosX=node_pos_x, NodePosY=node_pos_y,
+    )
+
+
+@mcp.tool()
+def ue_add_blueprint_branch_node(
+    blueprint_path: str, node_pos_x: int = 0, node_pos_y: int = 0,
+) -> dict:
+    """
+    Add a Branch (if/else) node to a Blueprint graph.
+
+    Args:
+        blueprint_path: Asset path of the Blueprint.
+        node_pos_x/y: Position in graph.
+    """
+    return ue_editor.call_plugin(
+        "AddBlueprintBranchNode", BlueprintPath=blueprint_path,
+        NodePosX=node_pos_x, NodePosY=node_pos_y,
+    )
+
+
+@mcp.tool()
+def ue_add_blueprint_generic_node(
+    blueprint_path: str, node_class_name: str,
+    node_pos_x: int = 0, node_pos_y: int = 0,
+) -> dict:
+    """
+    Add any Blueprint node by its class name. The ultimate escape hatch.
+
+    Common node classes:
+    - K2Node_Self: self reference
+    - K2Node_IfThenElse: branch
+    - K2Node_DynamicCast: cast
+    - K2Node_MakeArray: make array
+    - K2Node_Select: select
+    - K2Node_ForEachElementInEnum: for each enum
+
+    Args:
+        blueprint_path: Asset path of the Blueprint.
+        node_class_name: UClass name of the node.
+        node_pos_x/y: Position in graph.
+    """
+    return ue_editor.call_plugin(
+        "AddBlueprintGenericNode", BlueprintPath=blueprint_path,
+        NodeClassName=node_class_name,
+        NodePosX=node_pos_x, NodePosY=node_pos_y,
+    )
+
+
+@mcp.tool()
 def ue_set_blueprint_pin_value(
     blueprint_path: str, node_name: str, pin_name: str, value: str,
 ) -> dict:
