@@ -94,7 +94,12 @@ def call_plugin(function_name: str, port: int = DEFAULT_PORT, timeout: int = DEF
     except (ConnectionRefusedError, ConnectionResetError,
             urllib.error.URLError, OSError) as e:
         # Connection refused/reset — UE is likely down, check crash file
+        # Wait briefly for crash handler to finish writing
         crash = read_crash_info()
+        if crash is None:
+            import time
+            time.sleep(1)
+            crash = read_crash_info()
         if crash is not None:
             return {
                 "error": "UE editor crashed during MCP operation.",
@@ -157,6 +162,10 @@ def call_plugin_batch(calls: list[dict], port: int = DEFAULT_PORT, timeout: int 
         return {"error": f"Batch call timed out after {timeout}s.", "crashed": False}
     except (ConnectionRefusedError, ConnectionResetError, urllib.error.URLError, OSError) as e:
         crash = read_crash_info()
+        if crash is None:
+            import time
+            time.sleep(1)
+            crash = read_crash_info()
         if crash is not None:
             return {"error": "UE crashed during batch call.", "crashed": True, "crash_info": crash}
         return {"error": f"Cannot connect to UE plugin: {e}", "crashed": True}
