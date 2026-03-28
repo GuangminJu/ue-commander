@@ -840,6 +840,49 @@ def ue_create_blueprint(name: str, path: str = "/Game", parent_class: str = "Act
 
 
 @mcp.tool()
+def ue_create_blueprint_function(
+    blueprint_path: str, function_name: str,
+    inputs: str = "", outputs: str = "", pure: bool = False,
+) -> dict:
+    """
+    Create a new function graph in a Blueprint.
+    After creation, use ue_add_blueprint_node with graph_name to add nodes.
+
+    Args:
+        blueprint_path: Asset path of the Blueprint.
+        function_name: Name of the function.
+        inputs: Input params as "Name:Type,Name2:Type2" (e.g. "Speed:float,Target:Vector").
+        outputs: Output params as "Name:Type" (e.g. "Result:bool,Distance:float").
+        pure: If True, function has no exec pins (pure function).
+    """
+    return ue_editor.call_plugin(
+        "CreateBlueprintFunction", BlueprintPath=blueprint_path,
+        FunctionName=function_name, Inputs=inputs, Outputs=outputs, bPure=pure,
+    )
+
+
+@mcp.tool()
+def ue_create_blueprint_custom_event(
+    blueprint_path: str, event_name: str,
+    inputs: str = "", graph_name: str = "",
+) -> dict:
+    """
+    Add a custom event node to a Blueprint graph.
+    Custom events can be called from other Blueprints or C++.
+
+    Args:
+        blueprint_path: Asset path of the Blueprint.
+        event_name: Name of the custom event.
+        inputs: Input params as "Name:Type,Name2:Type2" (e.g. "Damage:float,Source:Actor").
+        graph_name: Target graph. Empty = EventGraph.
+    """
+    return ue_editor.call_plugin(
+        "CreateBlueprintCustomEvent", BlueprintPath=blueprint_path,
+        EventName=event_name, Inputs=inputs, GraphName=graph_name,
+    )
+
+
+@mcp.tool()
 def ue_add_blueprint_variable(
     blueprint_path: str, var_name: str, var_type: str, default_value: str = "",
 ) -> dict:
@@ -862,22 +905,25 @@ def ue_add_blueprint_variable(
 def ue_add_blueprint_node(
     blueprint_path: str, function_name: str,
     function_class: str = "", connect_to_event: str = "",
+    graph_name: str = "",
     node_pos_x: int = 300, node_pos_y: int = 0,
 ) -> dict:
     """
-    Add a function call node to a Blueprint's EventGraph.
+    Add a function call node to a Blueprint graph.
 
     Args:
         blueprint_path: Asset path of the Blueprint.
         function_name: Function to call (e.g. "PrintString", "SetActorLocation").
         function_class: Class owning the function (e.g. "KismetSystemLibrary"). Auto-detected if empty.
         connect_to_event: Connect exec pin to this event (e.g. "BeginPlay"). Empty = unconnected.
+        graph_name: Target graph name (e.g. "MyFunction"). Empty = EventGraph.
         node_pos_x/y: Position in graph.
     """
     return ue_editor.call_plugin(
         "AddBlueprintNode", BlueprintPath=blueprint_path,
         FunctionName=function_name, FunctionClass=function_class,
-        ConnectToEvent=connect_to_event, NodePosX=node_pos_x, NodePosY=node_pos_y,
+        ConnectToEvent=connect_to_event, GraphName=graph_name,
+        NodePosX=node_pos_x, NodePosY=node_pos_y,
     )
 
 
@@ -931,26 +977,30 @@ def ue_remove_blueprint_node(blueprint_path: str, node_name: str) -> dict:
 @mcp.tool()
 def ue_add_blueprint_variable_node(
     blueprint_path: str, var_name: str, setter: bool = False,
+    graph_name: str = "",
     node_pos_x: int = 0, node_pos_y: int = 0,
 ) -> dict:
     """
-    Add a variable Get or Set node to a Blueprint event graph.
+    Add a variable Get or Set node to a Blueprint graph.
 
     Args:
         blueprint_path: Asset path of the Blueprint.
         var_name: Variable name (must exist in the Blueprint).
         setter: True for Set node, False for Get node.
+        graph_name: Target graph name. Empty = EventGraph.
         node_pos_x/y: Position in graph.
     """
     return ue_editor.call_plugin(
         "AddBlueprintVariableNode", BlueprintPath=blueprint_path,
-        VarName=var_name, bSetter=setter, NodePosX=node_pos_x, NodePosY=node_pos_y,
+        VarName=var_name, bSetter=setter, GraphName=graph_name,
+        NodePosX=node_pos_x, NodePosY=node_pos_y,
     )
 
 
 @mcp.tool()
 def ue_add_blueprint_cast_node(
     blueprint_path: str, target_class: str, pure: bool = False,
+    graph_name: str = "",
     node_pos_x: int = 0, node_pos_y: int = 0,
 ) -> dict:
     """
@@ -960,28 +1010,32 @@ def ue_add_blueprint_cast_node(
         blueprint_path: Asset path of the Blueprint.
         target_class: Class to cast to (e.g. "ShooterCharacter", "Pawn").
         pure: Pure cast (no exec pins). Default False.
+        graph_name: Target graph name. Empty = EventGraph.
         node_pos_x/y: Position in graph.
     """
     return ue_editor.call_plugin(
         "AddBlueprintCastNode", BlueprintPath=blueprint_path,
-        TargetClass=target_class, bPure=pure,
+        TargetClass=target_class, bPure=pure, GraphName=graph_name,
         NodePosX=node_pos_x, NodePosY=node_pos_y,
     )
 
 
 @mcp.tool()
 def ue_add_blueprint_branch_node(
-    blueprint_path: str, node_pos_x: int = 0, node_pos_y: int = 0,
+    blueprint_path: str, graph_name: str = "",
+    node_pos_x: int = 0, node_pos_y: int = 0,
 ) -> dict:
     """
     Add a Branch (if/else) node to a Blueprint graph.
 
     Args:
         blueprint_path: Asset path of the Blueprint.
+        graph_name: Target graph name. Empty = EventGraph.
         node_pos_x/y: Position in graph.
     """
     return ue_editor.call_plugin(
         "AddBlueprintBranchNode", BlueprintPath=blueprint_path,
+        GraphName=graph_name,
         NodePosX=node_pos_x, NodePosY=node_pos_y,
     )
 
@@ -989,6 +1043,7 @@ def ue_add_blueprint_branch_node(
 @mcp.tool()
 def ue_add_blueprint_generic_node(
     blueprint_path: str, node_class_name: str,
+    graph_name: str = "",
     node_pos_x: int = 0, node_pos_y: int = 0,
 ) -> dict:
     """
@@ -1005,11 +1060,12 @@ def ue_add_blueprint_generic_node(
     Args:
         blueprint_path: Asset path of the Blueprint.
         node_class_name: UClass name of the node.
+        graph_name: Target graph name. Empty = EventGraph.
         node_pos_x/y: Position in graph.
     """
     return ue_editor.call_plugin(
         "AddBlueprintGenericNode", BlueprintPath=blueprint_path,
-        NodeClassName=node_class_name,
+        NodeClassName=node_class_name, GraphName=graph_name,
         NodePosX=node_pos_x, NodePosY=node_pos_y,
     )
 
