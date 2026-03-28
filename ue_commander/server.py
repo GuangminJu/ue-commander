@@ -563,6 +563,29 @@ def ue_scroll_widget(widget_path: str, delta: float = 3.0) -> dict:
     return ue_editor.call_plugin("ScrollWidget", WidgetPath=widget_path, Delta=delta)
 
 
+@mcp.tool()
+def ue_right_click_widget(widget_path: str) -> dict:
+    """
+    Simulate right-click on a widget (opens context menu).
+
+    Args:
+        widget_path: Widget path from ue_get_widget_tree or ue_search_widgets.
+    """
+    return ue_editor.call_plugin("RightClickWidget", WidgetPath=widget_path)
+
+
+@mcp.tool()
+def ue_drag_widget(source_path: str, target_path: str) -> dict:
+    """
+    Simulate drag from one widget to another (e.g., drag asset to viewport).
+
+    Args:
+        source_path: Source widget path (drag start).
+        target_path: Target widget path (drop target).
+    """
+    return ue_editor.call_plugin("DragWidget", SourcePath=source_path, TargetPath=target_path)
+
+
 # ---------------------------------------------------------------------------
 # Editor command tools (require OhMyUnrealEngine plugin)
 # ---------------------------------------------------------------------------
