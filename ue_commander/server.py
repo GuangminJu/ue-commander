@@ -1230,6 +1230,88 @@ def ue_list_functions(target: str, filter: str = "", offset: int = 0, limit: int
     return ue_editor.call_plugin("ListFunctions", Target=target, Filter=filter, Offset=offset, Limit=limit)
 
 
+@mcp.tool()
+def ue_call_static_function(class_name: str, function_name: str, args: str = "{}") -> dict:
+    """
+    Call a static UFUNCTION on a class (no instance needed).
+    WorldContextObject is auto-filled.
+
+    Examples:
+        ue_call_static_function("GameplayStatics", "GetAllActorsOfClass",
+            '{"ActorClass": "/Script/Engine.PointLight"}')
+        ue_call_static_function("KismetSystemLibrary", "GetDisplayName",
+            '{"Object": "/Game/MyActor"}')
+
+    Args:
+        class_name: Class name (e.g. "GameplayStatics", "KismetSystemLibrary").
+        function_name: Static function name.
+        args: JSON with param values.
+    """
+    return ue_editor.call_plugin("CallStaticFunction", ClassName=class_name, FunctionName=function_name, Args=args)
+
+
+@mcp.tool()
+def ue_find_objects(class_name: str, name_filter: str = "", limit: int = 20) -> dict:
+    """
+    Find UObject instances in memory by class name.
+
+    Args:
+        class_name: Class name (e.g. "StaticMesh", "MaterialInstance", "EditorAssetSubsystem").
+        name_filter: Optional name substring filter.
+        limit: Max results. Default 20.
+    """
+    return ue_editor.call_plugin("FindObjects", ClassName=class_name, NameFilter=name_filter, Limit=limit)
+
+
+@mcp.tool()
+def ue_get_subsystem(subsystem_name: str) -> dict:
+    """
+    Get an editor subsystem path. Use the returned path as target for ue_call_function.
+
+    Args:
+        subsystem_name: Subsystem class (e.g. "EditorAssetSubsystem", "EditorActorSubsystem").
+    """
+    return ue_editor.call_plugin("GetSubsystem", SubsystemName=subsystem_name)
+
+
+@mcp.tool()
+def ue_get_recent_logs(count: int = 30, filter: str = "") -> dict:
+    """
+    Get recent editor log messages captured from memory.
+    Much better than reading log files — real-time with category and verbosity.
+
+    Args:
+        count: Number of messages. Default 30.
+        filter: Optional text filter on message or category.
+    """
+    return ue_editor.call_plugin("GetRecentLogs", Count=count, Filter=filter)
+
+
+@mcp.tool()
+def ue_get_asset_references(asset_path: str) -> dict:
+    """
+    Get what an asset depends on and what references it.
+    Essential for safe refactoring and understanding asset relationships.
+
+    Args:
+        asset_path: Full asset path.
+    """
+    return ue_editor.call_plugin("GetAssetReferences", AssetPath=asset_path)
+
+
+@mcp.tool()
+def ue_rename_asset(source_path: str, dest_path: str, new_name: str) -> dict:
+    """
+    Rename or move an asset.
+
+    Args:
+        source_path: Current asset path.
+        dest_path: New package path.
+        new_name: New asset name.
+    """
+    return ue_editor.call_plugin("RenameAsset", SourcePath=source_path, DestPath=dest_path, NewName=new_name)
+
+
 # ---------------------------------------------------------------------------
 # Property tools — reflection-based, works on any UObject
 # ---------------------------------------------------------------------------
