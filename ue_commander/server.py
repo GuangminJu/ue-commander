@@ -1192,6 +1192,45 @@ def ue_screenshot(widget_path: str = "0", filename: str = "") -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Function call tools — reflection-based, works on any UObject
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def ue_call_function(target: str, function_name: str, args: str = "{}") -> dict:
+    """
+    Call ANY UFUNCTION on any UObject via UE reflection.
+    One tool to replace hundreds of specialized tools.
+
+    Examples:
+        ue_call_function("PointLight1", "SetActorHiddenInGame", '{"bNewHidden": "true"}')
+        ue_call_function("SM_Cube.StaticMeshComponent0", "SetMaterial",
+                         '{"ElementIndex": "0", "Material": "/Game/Materials/M_Red"}')
+        ue_call_function("MyActor", "K2_SetActorLocation",
+                         '{"NewLocation": "(X=100,Y=200,Z=300)", "bSweep": "false", "bTeleport": "true"}')
+
+    Args:
+        target: Actor name, "Actor.Component", or full object path.
+        function_name: UFUNCTION name.
+        args: JSON object with param name→value pairs. Values in UE text format.
+    """
+    return ue_editor.call_plugin("CallFunction", Target=target, FunctionName=function_name, Args=args)
+
+
+@mcp.tool()
+def ue_list_functions(target: str, filter: str = "", offset: int = 0, limit: int = 50) -> dict:
+    """
+    List all callable UFUNCTIONs on any UObject. Use to discover available functions.
+
+    Args:
+        target: Actor name, "Actor.Component", or full object path.
+        filter: Optional substring filter on function name.
+        offset: Pagination offset.
+        limit: Max results. Default 50.
+    """
+    return ue_editor.call_plugin("ListFunctions", Target=target, Filter=filter, Offset=offset, Limit=limit)
+
+
+# ---------------------------------------------------------------------------
 # Property tools — reflection-based, works on any UObject
 # ---------------------------------------------------------------------------
 
