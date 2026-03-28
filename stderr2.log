@@ -1,0 +1,80 @@
+[ue-commander] Project: OhMyUE  Engine: E:\UnrealEngine  IDE config: Development
+Processing request of type CallToolRequest
+  + Exception Group Traceback (most recent call last):
+  |   File "<frozen runpy>", line 198, in _run_module_as_main
+  |   File "<frozen runpy>", line 88, in _run_code
+  |   File "C:\Users\14293\Documents\Unreal Projects\OhMyUE\tools\ue_commander\.venv\Scripts\ue-commander.exe\__main__.py", line 10, in <module>
+  |   File "C:\Users\14293\Documents\Unreal Projects\OhMyUE\tools\ue_commander\ue_commander\__main__.py", line 22, in main
+  |     mcp.run()
+  |   File "C:\Users\14293\Documents\Unreal Projects\OhMyUE\tools\ue_commander\.venv\Lib\site-packages\mcp\server\fastmcp\server.py", line 296, in run
+  |     anyio.run(self.run_stdio_async)
+  |   File "C:\Users\14293\Documents\Unreal Projects\OhMyUE\tools\ue_commander\.venv\Lib\site-packages\anyio\_core\_eventloop.py", line 77, in run
+  |     return async_backend.run(func, args, {}, backend_options)
+  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |   File "C:\Users\14293\Documents\Unreal Projects\OhMyUE\tools\ue_commander\.venv\Lib\site-packages\anyio\_backends\_asyncio.py", line 2358, in run
+  |     return runner.run(wrapper())
+  |            ^^^^^^^^^^^^^^^^^^^^^
+  |   File "C:\Users\14293\AppData\Roaming\uv\python\cpython-3.12.12-windows-x86_64-none\Lib\asyncio\runners.py", line 118, in run
+  |     return self._loop.run_until_complete(task)
+  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |   File "C:\Users\14293\AppData\Roaming\uv\python\cpython-3.12.12-windows-x86_64-none\Lib\asyncio\base_events.py", line 691, in run_until_complete
+  |     return future.result()
+  |            ^^^^^^^^^^^^^^^
+  |   File "C:\Users\14293\Documents\Unreal Projects\OhMyUE\tools\ue_commander\.venv\Lib\site-packages\anyio\_backends\_asyncio.py", line 2341, in wrapper
+  |     return await func(*args)
+  |            ^^^^^^^^^^^^^^^^^
+  |   File "C:\Users\14293\Documents\Unreal Projects\OhMyUE\tools\ue_commander\.venv\Lib\site-packages\mcp\server\fastmcp\server.py", line 755, in run_stdio_async
+  |     async with stdio_server() as (read_stream, write_stream):
+  |                ^^^^^^^^^^^^^^
+  |   File "C:\Users\14293\AppData\Roaming\uv\python\cpython-3.12.12-windows-x86_64-none\Lib\contextlib.py", line 231, in __aexit__
+  |     await self.gen.athrow(value)
+  |   File "C:\Users\14293\Documents\Unreal Projects\OhMyUE\tools\ue_commander\.venv\Lib\site-packages\mcp\server\stdio.py", line 85, in stdio_server
+  |     async with anyio.create_task_group() as tg:
+  |                ^^^^^^^^^^^^^^^^^^^^^^^^^
+  |   File "C:\Users\14293\Documents\Unreal Projects\OhMyUE\tools\ue_commander\.venv\Lib\site-packages\anyio\_backends\_asyncio.py", line 799, in __aexit__
+  |     raise BaseExceptionGroup(
+  | ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)
+  +-+---------------- 1 ----------------
+    | Exception Group Traceback (most recent call last):
+    |   File "C:\Users\14293\Documents\Unreal Projects\OhMyUE\tools\ue_commander\.venv\Lib\site-packages\mcp\server\stdio.py", line 88, in stdio_server
+    |     yield read_stream, write_stream
+    |   File "C:\Users\14293\Documents\Unreal Projects\OhMyUE\tools\ue_commander\.venv\Lib\site-packages\mcp\server\fastmcp\server.py", line 756, in run_stdio_async
+    |     await self._mcp_server.run(
+    |   File "C:\Users\14293\Documents\Unreal Projects\OhMyUE\tools\ue_commander\.venv\Lib\site-packages\mcp\server\lowlevel\server.py", line 656, in run
+    |     async with AsyncExitStack() as stack:
+    |                ^^^^^^^^^^^^^^^^
+    |   File "C:\Users\14293\AppData\Roaming\uv\python\cpython-3.12.12-windows-x86_64-none\Lib\contextlib.py", line 754, in __aexit__
+    |     raise exc_details[1]
+    |   File "C:\Users\14293\AppData\Roaming\uv\python\cpython-3.12.12-windows-x86_64-none\Lib\contextlib.py", line 737, in __aexit__
+    |     cb_suppress = await cb(*exc_details)
+    |                   ^^^^^^^^^^^^^^^^^^^^^^
+    |   File "C:\Users\14293\Documents\Unreal Projects\OhMyUE\tools\ue_commander\.venv\Lib\site-packages\mcp\shared\session.py", line 238, in __aexit__
+    |     return await self._task_group.__aexit__(exc_type, exc_val, exc_tb)
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |   File "C:\Users\14293\Documents\Unreal Projects\OhMyUE\tools\ue_commander\.venv\Lib\site-packages\anyio\_backends\_asyncio.py", line 799, in __aexit__
+    |     raise BaseExceptionGroup(
+    | ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)
+    +-+---------------- 1 ----------------
+      | Exception Group Traceback (most recent call last):
+      |   File "C:\Users\14293\Documents\Unreal Projects\OhMyUE\tools\ue_commander\.venv\Lib\site-packages\mcp\server\lowlevel\server.py", line 673, in run
+      |     async with anyio.create_task_group() as tg:
+      |                ^^^^^^^^^^^^^^^^^^^^^^^^^
+      |   File "C:\Users\14293\Documents\Unreal Projects\OhMyUE\tools\ue_commander\.venv\Lib\site-packages\anyio\_backends\_asyncio.py", line 799, in __aexit__
+      |     raise BaseExceptionGroup(
+      | ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)
+      +-+---------------- 1 ----------------
+        | Traceback (most recent call last):
+        |   File "C:\Users\14293\Documents\Unreal Projects\OhMyUE\tools\ue_commander\.venv\Lib\site-packages\mcp\server\lowlevel\server.py", line 696, in _handle_message
+        |     await self._handle_request(message, req, session, lifespan_context, raise_exceptions)
+        |   File "C:\Users\14293\Documents\Unreal Projects\OhMyUE\tools\ue_commander\.venv\Lib\site-packages\mcp\server\lowlevel\server.py", line 781, in _handle_request
+        |     await message.respond(response)
+        |   File "C:\Users\14293\Documents\Unreal Projects\OhMyUE\tools\ue_commander\.venv\Lib\site-packages\mcp\shared\session.py", line 134, in respond
+        |     await self._session._send_response(  # type: ignore[reportPrivateUsage]
+        |   File "C:\Users\14293\Documents\Unreal Projects\OhMyUE\tools\ue_commander\.venv\Lib\site-packages\mcp\shared\session.py", line 349, in _send_response
+        |     await self._write_stream.send(session_message)
+        |   File "C:\Users\14293\Documents\Unreal Projects\OhMyUE\tools\ue_commander\.venv\Lib\site-packages\anyio\streams\memory.py", line 249, in send
+        |     self.send_nowait(item)
+        |   File "C:\Users\14293\Documents\Unreal Projects\OhMyUE\tools\ue_commander\.venv\Lib\site-packages\anyio\streams\memory.py", line 218, in send_nowait
+        |     raise ClosedResourceError
+        | anyio.ClosedResourceError
+        +------------------------------------

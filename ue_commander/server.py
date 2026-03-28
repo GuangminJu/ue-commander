@@ -425,6 +425,32 @@ def ue_clear_crash() -> dict:
     }
 
 
+@mcp.tool()
+def ue_batch(calls: str) -> dict:
+    """
+    Execute multiple plugin tool calls in a single request.
+    All calls run sequentially in one undo transaction — Ctrl+Z reverts everything.
+
+    Args:
+        calls: JSON array of calls. Each element: {"function":"ToolName","params":{...}}
+
+    Example:
+        [
+          {"function":"SpawnActor","params":{"ClassName":"StaticMeshActor","Label":"Cube1","LocationX":100}},
+          {"function":"SpawnActor","params":{"ClassName":"PointLight","Label":"Light1","LocationZ":300}},
+          {"function":"SetProperty","params":{"Target":"Light1.PointLightComponent0","PropertyName":"Intensity","Value":"8000"}}
+        ]
+    """
+    import json as _json
+    try:
+        parsed = _json.loads(calls)
+    except _json.JSONDecodeError as e:
+        return {"error": f"Invalid JSON: {e}"}
+    if not isinstance(parsed, list):
+        return {"error": "Expected a JSON array of calls"}
+    return ue_editor.call_plugin_batch(parsed)
+
+
 # ---------------------------------------------------------------------------
 # Auto-registered plugin tools
 # ---------------------------------------------------------------------------
