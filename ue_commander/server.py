@@ -993,6 +993,56 @@ def ue_add_blueprint_generic_node(
 
 
 @mcp.tool()
+def ue_add_blueprint_component(
+    blueprint_path: str, component_class: str,
+    component_name: str = "", attach_to_root: bool = True,
+) -> dict:
+    """
+    Add a component to a Blueprint CLASS (template level).
+    All instances of this Blueprint will have this component.
+
+    Args:
+        blueprint_path: Asset path of the Blueprint.
+        component_class: Component class (e.g. "StaticMeshComponent", "SphereComponent",
+                         "PointLightComponent", "BoxCollisionComponent").
+        component_name: Name for the component. Auto-generated if empty.
+        attach_to_root: Attach to root component. Default True.
+    """
+    return ue_editor.call_plugin(
+        "AddBlueprintComponent", BlueprintPath=blueprint_path,
+        ComponentClass=component_class, ComponentName=component_name,
+        bAttachToRoot=attach_to_root,
+    )
+
+
+@mcp.tool()
+def ue_set_blueprint_component_property(
+    blueprint_path: str, component_name: str,
+    property_name: str, value: str,
+) -> dict:
+    """
+    Set a property on a Blueprint component template.
+    Affects all instances of the Blueprint.
+
+    Examples:
+        ue_set_blueprint_component_property(bp, "MeshComp", "StaticMesh",
+            "/Game/LootSet/Meshes/Atlas/atlas_gem_01.atlas_gem_01")
+        ue_set_blueprint_component_property(bp, "MeshComp", "CollisionEnabled",
+            "NoCollision")
+
+    Args:
+        blueprint_path: Asset path of the Blueprint.
+        component_name: Component variable name in the Blueprint.
+        property_name: Property to set.
+        value: Value in UE text format.
+    """
+    return ue_editor.call_plugin(
+        "SetBlueprintComponentProperty", BlueprintPath=blueprint_path,
+        ComponentName=component_name, PropertyName=property_name, Value=value,
+    )
+
+
+@mcp.tool()
 def ue_set_blueprint_pin_value(
     blueprint_path: str, node_name: str, pin_name: str, value: str,
 ) -> dict:

@@ -266,17 +266,38 @@ def close(cfg: UEConfig, force: bool = False, timeout: int = 30, user_override: 
             _clear_lock(cfg)
             return {"ok": True, "message": f"Force-killed UE process (PID {pid}).", "launched_by": "ue-commander" if ai_launched else "user"}
 
+        # Try graceful shutdown via plugin HTTP API first:
+        # SaveAll to avoid save dialog, then RequestExit
+        closed_via_plugin = False
+        try:
+            from . import ue_editor
+            if ue_editor.is_plugin_available():
+                ue_editor.call_plugin("RequestExit", timeout=10)
+                # Wait briefly for editor to start closing
+                try:
+                    proc.wait(timeout=5)
+                    closed_via_plugin = True
+                except psutil.TimeoutExpired:
+                    pass
+        except Exception:
+            pass
+
+        if closed_via_plugin:
+            _clear_lock(cfg)
+            return {"ok": True, "message": f"Closed UE gracefully via plugin (PID {pid}).", "launched_by": "ue-commander" if ai_launched else "user"}
+
+        # Fallback: OS-level terminate
         proc.terminate()
         try:
             proc.wait(timeout=timeout)
             _clear_lock(cfg)
-            return {"ok": True, "message": f"Closed UE gracefully (PID {pid}).", "launched_by": "ue-commander" if ai_launched else "user"}
+            return {"ok": True, "message": f"Closed UE via terminate (PID {pid}).", "launched_by": "ue-commander" if ai_launched else "user"}
         except psutil.TimeoutExpired:
-            return {
-                "ok": False,
-                "error": f"UE (PID {pid}) did not close within {timeout}s. "
-                         "Call ue_close with force=true to force-kill it.",
-            }
+            # Last resort: force kill
+            proc.kill()
+            proc.wait(timeout=5)
+            _clear_lock(cfg)
+            return {"ok": True, "message": f"Force-killed UE after timeout (PID {pid}).", "launched_by": "ue-commander" if ai_launched else "user"}
     except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
         _clear_lock(cfg)
         return {"ok": False, "error": str(e)}
