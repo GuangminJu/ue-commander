@@ -110,33 +110,48 @@ async def compile(
         )
 
     target_name = f"{cfg.project_name}{target}" if target != "Game" else cfg.project_name
-    # Escaped quotes around project path (matches Rider's format)
-    project_escaped = f'\\"{cfg.project_path}\\"'
-
-    # Use Rider-style -Target= syntax (modern UBT format)
-    # Primary target: the project editor/game
-    primary_target = f'{target_name} {platform} {config} -Project={project_escaped}'
-    # ShaderCompileWorker: always needed alongside editor builds
-    scw_target = f'ShaderCompileWorker {platform} Development -Project={project_escaped} -Quiet'
 
     # Map platform to architecture flag
     arch_map = {"Win64": "x64", "Win32": "x86"}
     arch = arch_map.get(platform, "")
 
-    # Build the full command line string with correct quoting for cmd.exe
-    # -Target= values contain spaces and embedded quotes, so we must
-    # construct the string exactly as Rider does on the command line.
-    bat = str(cfg.build_bat)
-    parts = [
-        f'"{bat}"' if " " in bat else bat,
-        f'-Target="{primary_target}"',
-        f'-Target="{scw_target}"',
-        "-WaitMutex",
-        "-FromMsBuild",
-    ]
-    if arch:
-        parts.append(f"-architecture={arch}")
-    command_str = " ".join(parts)
+    # Prefer calling UBT dll directly (bypasses Build.bat file-lock entirely).
+    # Fall back to Build.bat only if the dll is not found.
+    ubt_dll = cfg.build_bat.parent.parent.parent / "Binaries" / "DotNET" / "UnrealBuildTool" / "UnrealBuildTool.dll"
+    if ubt_dll.exists():
+        # Direct dotnet invocation — pass args directly, no shell quoting needed
+        proj = str(cfg.project_path)
+        primary_target = f'{target_name} {platform} {config} -Project="{proj}"'
+        scw_target = f'ShaderCompileWorker {platform} Development -Project="{proj}" -Quiet'
+        exec_args = [
+            "dotnet",
+            str(ubt_dll),
+            f"-Target={primary_target}",
+            f"-Target={scw_target}",
+            "-FromMsBuild",
+        ]
+        if arch:
+            exec_args.append(f"-architecture={arch}")
+        command_str = " ".join(exec_args)
+        use_shell = False
+    else:
+        # Legacy: call Build.bat via cmd shell (uses file lock)
+        project_escaped = f'\\"{cfg.project_path}\\"'
+        primary_target = f'{target_name} {platform} {config} -Project={project_escaped}'
+        scw_target = f'ShaderCompileWorker {platform} Development -Project={project_escaped} -Quiet'
+        bat = str(cfg.build_bat)
+        bat_parts = [
+            f'"{bat}"' if " " in bat else bat,
+            f'-Target="{primary_target}"',
+            f'-Target="{scw_target}"',
+            "-WaitMutex",
+            "-FromMsBuild",
+        ]
+        if arch:
+            bat_parts.append(f"-architecture={arch}")
+        command_str = " ".join(bat_parts)
+        exec_args = []
+        use_shell = True
 
     if ctx:
         await ctx.info(f"Starting compilation: {target_name} {config} {platform}")
@@ -145,12 +160,18 @@ async def compile(
     all_lines: list[str] = []
 
     try:
-        # Use shell mode so cmd.exe parses the quoting correctly
-        proc = await asyncio.create_subprocess_shell(
-            command_str,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
+        if use_shell:
+            proc = await asyncio.create_subprocess_shell(
+                command_str,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+        else:
+            proc = await asyncio.create_subprocess_exec(
+                *exec_args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
 
         assert proc.stdout is not None
         compile_re = re.compile(r"\[(\d+)/(\d+)\]")
