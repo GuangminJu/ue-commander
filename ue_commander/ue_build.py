@@ -7,6 +7,7 @@ import asyncio
 import re
 import subprocess
 import threading
+import psutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Protocol
@@ -39,6 +40,21 @@ class BuildResult:
 _ERROR_RE = re.compile(r"error\s+[A-Z]\d+:", re.IGNORECASE)
 _WARNING_RE = re.compile(r"warning\s+[A-Z]\d+:", re.IGNORECASE)
 _COMPILE_ERROR_RE = re.compile(r"\((\d+)\)\s*:\s*(error|fatal error)\s+", re.IGNORECASE)
+
+
+def _kill_conflicting_ubt() -> list[int]:
+    """Kill any dotnet processes running UnrealBuildTool to release the mutex."""
+    killed = []
+    for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+        try:
+            if proc.info["name"] and "dotnet" in proc.info["name"].lower():
+                cmdline = " ".join(proc.info["cmdline"] or [])
+                if "UnrealBuildTool" in cmdline:
+                    proc.kill()
+                    killed.append(proc.info["pid"])
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    return killed
 
 
 def _parse_output(lines: list[str]) -> tuple[list[str], list[str]]:
@@ -123,23 +139,51 @@ async def compile(
         compile_re = re.compile(r"\[(\d+)/(\d+)\]")
         current, total = 0, 100
         last_pct = -1
+        import time
+        last_info_time = time.time()
+        INFO_INTERVAL = 10  # seconds between heartbeat info messages
 
         async for raw_line in proc.stdout:
             line = raw_line.decode("utf-8", errors="replace")
             all_lines.append(line)
 
-            # Report live progress to Claude UI
+            # Detect mutex deadlock and break out immediately
+            if "Build.bat is already running" in line or "waiting for existing script to terminate" in line.lower():
+                proc.kill()
+                killed = _kill_conflicting_ubt()
+                msg = f"UBT mutex conflict detected — killed PIDs {killed}. Retry ue_compile now."
+                if ctx:
+                    await ctx.info(f"⚠ {msg}")
+                return BuildResult(
+                    ok=False,
+                    return_code=-1,
+                    errors=[msg],
+                    output_tail="\n".join(all_lines),
+                    command=command_str,
+                )
+
             if ctx and line.strip():
                 m = compile_re.search(line)
                 if m:
                     current, total = int(m.group(1)), int(m.group(2))
                     pct = int(current * 100 / total) if total > 0 else 0
-                    if pct > last_pct:
+                    log_part = line.split("]", 1)[-1].strip() if "]" in line else line.strip()
+                    await ctx.report_progress(current, total, log_part)
+                    # Emit info every 10% or every INFO_INTERVAL seconds
+                    now = time.time()
+                    if pct >= last_pct + 10 or now - last_info_time >= INFO_INTERVAL:
                         last_pct = pct
-                        log_part = line.split("]", 1)[-1].strip() if "]" in line else line.strip()
-                        await ctx.report_progress(current, total, log_part)
+                        last_info_time = now
+                        await ctx.info(f"[{current}/{total}] {pct}% — {log_part[:100]}")
                 else:
-                    await ctx.report_progress(current, total, line.strip()[:120])
+                    stripped = line.strip()
+                    await ctx.report_progress(current, total, stripped[:120])
+                    # Always show errors/warnings and periodic heartbeat
+                    now = time.time()
+                    is_important = any(kw in stripped.lower() for kw in ("error", "warning", "link", "note:", "fatal"))
+                    if is_important or now - last_info_time >= INFO_INTERVAL:
+                        last_info_time = now
+                        await ctx.info(stripped[:200])
 
         rc = await asyncio.wait_for(proc.wait(), timeout=timeout)
 
