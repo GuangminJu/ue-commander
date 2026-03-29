@@ -43,17 +43,33 @@ _COMPILE_ERROR_RE = re.compile(r"\((\d+)\)\s*:\s*(error|fatal error)\s+", re.IGN
 
 
 def _kill_conflicting_ubt() -> list[int]:
-    """Kill any dotnet processes running UnrealBuildTool to release the mutex."""
+    """Kill UBT/Build.bat processes and delete the file lock so compilation can proceed."""
+    import tempfile, os
+
     killed = []
+    # Kill dotnet processes running UnrealBuildTool
     for proc in psutil.process_iter(["pid", "name", "cmdline"]):
         try:
-            if proc.info["name"] and "dotnet" in proc.info["name"].lower():
-                cmdline = " ".join(proc.info["cmdline"] or [])
-                if "UnrealBuildTool" in cmdline:
-                    proc.kill()
-                    killed.append(proc.info["pid"])
+            name = (proc.info["name"] or "").lower()
+            cmdline = " ".join(proc.info["cmdline"] or [])
+            if ("dotnet" in name and "UnrealBuildTool" in cmdline) or \
+               ("cmd" in name and "Build.bat" in cmdline):
+                proc.kill()
+                killed.append(proc.info["pid"])
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
+
+    # Delete the Build.bat file lock
+    # Lock file path: %TEMP%\<Build.bat path with \ -> - and : stripped>.lock
+    build_bat = Path("E:/UnrealEngine/Engine/Build/BatchFiles/Build.bat")
+    lock_name = str(build_bat).replace("\\", "-").replace("/", "-").replace(":", "") + ".lock"
+    lock_path = Path(tempfile.gettempdir()) / lock_name
+    if lock_path.exists():
+        try:
+            lock_path.unlink()
+        except OSError:
+            pass
+
     return killed
 
 
@@ -75,6 +91,7 @@ async def compile(
     timeout: int = 600,
     live_output_lines: int = 40,
     ctx: ProgressReporter | None = None,
+    _retry: bool = False,
 ) -> BuildResult:
     """
     Compile the project's C++ code using UnrealBuildTool.
@@ -147,20 +164,23 @@ async def compile(
             line = raw_line.decode("utf-8", errors="replace")
             all_lines.append(line)
 
-            # Detect mutex deadlock and break out immediately
+            # Detect mutex deadlock — kill conflicting processes, delete lock, restart
             if "Build.bat is already running" in line or "waiting for existing script to terminate" in line.lower():
                 proc.kill()
                 killed = _kill_conflicting_ubt()
-                msg = f"UBT mutex conflict detected — killed PIDs {killed}. Retry ue_compile now."
+                if _retry:
+                    # Already retried once — give up
+                    msg = f"UBT mutex conflict persists after retry (killed {killed}). Check for stuck Build.bat processes."
+                    if ctx:
+                        await ctx.info(f"✗ {msg}")
+                    return BuildResult(ok=False, return_code=-1, errors=[msg],
+                                       output_tail="\n".join(all_lines), command=command_str)
                 if ctx:
-                    await ctx.info(f"⚠ {msg}")
-                return BuildResult(
-                    ok=False,
-                    return_code=-1,
-                    errors=[msg],
-                    output_tail="\n".join(all_lines),
-                    command=command_str,
-                )
+                    await ctx.info(f"⚠ UBT mutex conflict — killed {killed}, cleared lock. Restarting build...")
+                await asyncio.sleep(2)
+                return await compile(cfg, target=target, config=config, platform=platform,
+                                     timeout=timeout, live_output_lines=live_output_lines, ctx=ctx,
+                                     _retry=True)
 
             if ctx and line.strip():
                 m = compile_re.search(line)
