@@ -103,34 +103,41 @@ def find_project_ue_process(cfg: UEConfig) -> psutil.Process | None:
     return None
 
 
+def _detect_project_from_proc(proc: psutil.Process) -> str | None:
+    """Try to detect the project name from the process command line."""
+    try:
+        for arg in proc.cmdline():
+            if arg.endswith(".uproject"):
+                return Path(arg).stem
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        pass
+    return None
+
+
 def get_status(cfg: UEConfig) -> UEProcessInfo:
-    """Get status of the UE editor for this project."""
+    """Get status of the UE editor — works with any project, not just cfg.project_name."""
     all_procs = find_ue_processes(cfg)
     proj_proc = find_project_ue_process(cfg)
 
-    if proj_proc:
+    # Prefer the project-specific process if found
+    active_proc = proj_proc or (all_procs[0] if all_procs else None)
+
+    if active_proc:
         try:
-            mem = proj_proc.memory_info().rss / (1024 * 1024)
-            uptime = time.time() - proj_proc.create_time()
-            ai = _is_ai_launched(cfg, proj_proc.pid)
+            mem = active_proc.memory_info().rss / (1024 * 1024)
+            uptime = time.time() - active_proc.create_time()
+            ai = _is_ai_launched(cfg, active_proc.pid)
+            detected_project = _detect_project_from_proc(active_proc) or cfg.project_name
             return UEProcessInfo(
                 running=True,
-                pid=proj_proc.pid,
-                project=cfg.project_name,
+                pid=active_proc.pid,
+                project=detected_project,
                 uptime_seconds=round(uptime),
                 memory_mb=round(mem, 1),
                 launched_by="ue-commander" if ai else "user",
             )
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
-
-    # UE is running but not for our project
-    if all_procs:
-        return UEProcessInfo(
-            running=False,
-            pid=None,
-            project=None,
-        )
 
     return UEProcessInfo(running=False)
 

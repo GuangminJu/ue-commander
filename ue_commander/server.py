@@ -42,20 +42,23 @@ def _get_cfg():
 @mcp.tool()
 def ue_status() -> dict:
     """
-    Check whether Unreal Editor is currently running for this project.
-    Returns process info (PID, memory, uptime) if running.
+    Check whether any Unreal Editor is currently running.
+    Returns process info (PID, memory, uptime, which project is loaded) if running.
     Also probes the plugin HTTP endpoint to report whether the editor
     is fully loaded and ready to accept commands (plugin_ready field).
     """
     cfg = _get_cfg()
     info = ue_process.get_status(cfg)
+    plugin_ready = ue_editor.is_plugin_available()
+
+    # If any UE process is running (even a different project), report it
+    editor_running = info.running or plugin_ready
     result = {
-        "project": cfg.project_name,
+        "project": info.project if info.running else cfg.project_name,
         "engine_path": str(cfg.engine_path),
-        "editor_running": info.running,
+        "editor_running": editor_running,
     }
-    if info.running:
-        plugin_ready = ue_editor.is_plugin_available()
+    if editor_running:
         phase = "ready" if plugin_ready else "loading"
         result.update({
             "pid": info.pid,
@@ -79,16 +82,17 @@ def ue_status() -> dict:
 
 @mcp.tool()
 async def ue_launch(
+    project_path: str | None = None,
     extra_args: list[str] | None = None,
     compile_first: bool = False,
-    wait_ready: bool = False,
+    wait_ready: bool = True,
     ready_timeout: int = 180,
     ctx: Context | None = None,
 ) -> dict:
     """
-    Launch the Unreal Editor for this project.
+    Launch the Unreal Editor for any project.
 
-    Passes -auto and -skipcompile flags to suppress startup prompts.
+    Passes -skipcompile flags to suppress startup prompts.
     Call ue_compile BEFORE this if you changed C++ code.
 
     After launching, waits for the editor to fully load by polling the
@@ -100,6 +104,9 @@ async def ue_launch(
     preventing duplicate instances.
 
     Args:
+        project_path: Optional path to a .uproject file or project directory.
+                      If omitted, launches the default configured project (OhMyUE).
+                      Example: "C:/Users/14293/Documents/Unreal Projects/SurvivorsRoguelike"
         extra_args: Optional additional arguments passed to UnrealEditor.exe,
                     e.g. ["-log", "-game"]. Leave empty for normal editor launch.
         compile_first: If True, run UBT compile before launching (slow, blocks for minutes).
@@ -108,7 +115,20 @@ async def ue_launch(
                     before returning. Set False for fire-and-forget.
         ready_timeout: Max seconds to wait for editor readiness. Default 180 (3 min).
     """
-    cfg = _get_cfg()
+    if project_path:
+        from pathlib import Path
+        from .config import detect_config
+        p = Path(project_path)
+        if p.is_dir():
+            matches = list(p.glob("*.uproject"))
+            if not matches:
+                return {"ok": False, "error": f"No .uproject found in {p}"}
+            p = matches[0]
+        if not p.exists():
+            return {"ok": False, "error": f"Project file not found: {p}"}
+        cfg = detect_config(p)
+    else:
+        cfg = _get_cfg()
     return await ue_process.launch(
         cfg, extra_args=extra_args, compile_first=compile_first,
         wait_ready=wait_ready, ready_timeout=ready_timeout, ctx=ctx,

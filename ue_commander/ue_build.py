@@ -121,21 +121,25 @@ async def compile(
 
         assert proc.stdout is not None
         compile_re = re.compile(r"\[(\d+)/(\d+)\]")
+        current, total = 0, 100
         last_pct = -1
 
         async for raw_line in proc.stdout:
             line = raw_line.decode("utf-8", errors="replace")
             all_lines.append(line)
 
-            # Report progress from UBT's [N/Total] markers
-            if ctx:
+            # Report live progress to Claude UI
+            if ctx and line.strip():
                 m = compile_re.search(line)
                 if m:
                     current, total = int(m.group(1)), int(m.group(2))
                     pct = int(current * 100 / total) if total > 0 else 0
                     if pct > last_pct:
                         last_pct = pct
-                        await ctx.report_progress(current, total, f"Compiling [{current}/{total}]")
+                        log_part = line.split("]", 1)[-1].strip() if "]" in line else line.strip()
+                        await ctx.report_progress(current, total, log_part)
+                else:
+                    await ctx.report_progress(current, total, line.strip()[:120])
 
         rc = await asyncio.wait_for(proc.wait(), timeout=timeout)
 
