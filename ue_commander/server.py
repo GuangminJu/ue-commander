@@ -172,63 +172,120 @@ def ue_close_all(force: bool = False) -> dict:
     return ue_process.close_all_ue(force=force)
 
 
+# Module-level compile state — tracks the background build process
+_compile_state: dict = {"task": None, "result": None, "running": False, "log_path": ""}
+
+
 @mcp.tool()
-async def ue_compile(
+def ue_compile(
     config: BuildConfig | None = None,
     target: BuildTarget | None = None,
     platform: BuildPlatform | None = None,
     timeout: int = 600,
-    ctx: Context | None = None,
 ) -> dict:
     """
-    Compile the project's C++ code using UnrealBuildTool.
+    Start a background C++ compilation and return IMMEDIATELY.
 
-    By default, uses the build configuration detected from your IDE (Rider/VS Code).
-    Override any parameter only when you have a specific reason to deviate from
-    the current IDE configuration — doing so may produce binaries incompatible
-    with your IDE debugger.
+    Does NOT block — returns as soon as UBT is launched.
+    Poll ue_compile_status to check if compilation finished and read errors.
 
     Valid values:
       config:   Debug | DebugGame | Development | Shipping | Test
       target:   Editor | Game | Client | Server
       platform: Win64 | Win32 | Mac | Linux
-
-    Args:
-        config:   Build configuration. Defaults to IDE-detected config.
-        target:   Build target. Defaults to IDE-detected target.
-        platform: Target platform. Defaults to IDE-detected platform.
-        timeout:  Max seconds to wait for compilation. Default 600 (10 min).
     """
-    cfg = _get_cfg()
+    import asyncio, threading, tempfile, os
 
-    # Fill from IDE config when not explicitly overridden
+    if _compile_state["running"]:
+        return {"ok": False, "error": "Compilation already running. Call ue_compile_status to check progress."}
+
+    cfg = _get_cfg()
     ide = cfg.ide_build
     resolved_config: BuildConfig = config or (ide.config if ide else "Development")
     resolved_target: BuildTarget = target or (ide.target if ide else "Editor")
     resolved_platform: BuildPlatform = platform or (ide.platform if ide else "Win64")
 
-    result = await ue_build.compile(
-        cfg,
-        config=resolved_config,
-        target=resolved_target,
-        platform=resolved_platform,
-        timeout=timeout,
-        ctx=ctx,
-    )
+    log_path = os.path.join(tempfile.gettempdir(), "ue_compile_output.log")
+    _compile_state["running"] = True
+    _compile_state["result"] = None
+    _compile_state["log_path"] = log_path
+
+    def _run():
+        import asyncio as _asyncio
+        loop = _asyncio.new_event_loop()
+        result = loop.run_until_complete(ue_build.compile(
+            cfg,
+            config=resolved_config,
+            target=resolved_target,
+            platform=resolved_platform,
+            timeout=timeout,
+        ))
+        # Write full output to log file
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.write(result.output_tail)
+        _compile_state["result"] = result
+        _compile_state["running"] = False
+        loop.close()
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
 
     return {
+        "ok": True,
+        "status": "started",
+        "message": "Compilation started in background. Call ue_compile_status to check progress.",
+        "log_file": log_path,
+        "config": resolved_config,
+        "target": resolved_target,
+        "platform": resolved_platform,
+    }
+
+
+@mcp.tool()
+def ue_compile_status() -> dict:
+    """
+    Check the status of the background compilation started by ue_compile.
+
+    Returns running=true if still compiling, or the full result when done.
+    Call this repeatedly until running=false.
+    """
+    import os
+
+    if _compile_state["running"]:
+        # Read partial log if available
+        log_path = _compile_state.get("log_path", "")
+        tail = ""
+        if log_path and os.path.exists(log_path):
+            try:
+                with open(log_path, encoding="utf-8", errors="replace") as f:
+                    lines = f.readlines()
+                tail = "".join(lines[-30:])
+            except Exception:
+                pass
+        return {"running": True, "status": "compiling", "log_tail": tail}
+
+    result = _compile_state.get("result")
+    if result is None:
+        return {"running": False, "status": "not_started"}
+
+    log_path = _compile_state.get("log_path", "")
+    full_log = ""
+    if log_path and os.path.exists(log_path):
+        try:
+            with open(log_path, encoding="utf-8", errors="replace") as f:
+                full_log = f.read()
+        except Exception:
+            pass
+
+    return {
+        "running": False,
         "ok": result.ok,
         "return_code": result.return_code,
-        "command": result.command,
-        "resolved_config": resolved_config,
-        "resolved_target": resolved_target,
-        "resolved_platform": resolved_platform,
-        "ide_config_source": ide.source if ide else "none",
         "error_count": len(result.errors),
         "warning_count": len(result.warnings),
         "errors": result.errors,
         "warnings": result.warnings,
-        "build_output": result.output_tail,
+        "log_tail": full_log[-4000:] if full_log else result.output_tail[-4000:],
     }
 
 
