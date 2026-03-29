@@ -285,7 +285,7 @@ def ue_compile_status() -> dict:
         "warning_count": len(result.warnings),
         "errors": result.errors,
         "warnings": result.warnings,
-        "log_tail": full_log[-4000:] if full_log else result.output_tail[-4000:],
+        "log": full_log if full_log else result.output_tail,
     }
 
 
