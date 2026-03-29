@@ -207,24 +207,10 @@ async def compile(
                 m = compile_re.search(line)
                 if m:
                     current, total = int(m.group(1)), int(m.group(2))
-                    pct = int(current * 100 / total) if total > 0 else 0
                     log_part = line.split("]", 1)[-1].strip() if "]" in line else line.strip()
-                    await ctx.report_progress(current, total, log_part)
-                    # Emit info every 10% or every INFO_INTERVAL seconds
-                    now = time.time()
-                    if pct >= last_pct + 10 or now - last_info_time >= INFO_INTERVAL:
-                        last_pct = pct
-                        last_info_time = now
-                        await ctx.info(f"[{current}/{total}] {pct}% — {log_part[:100]}")
+                    await ctx.info(f"[{current}/{total}] {log_part}")
                 else:
-                    stripped = line.strip()
-                    await ctx.report_progress(current, total, stripped[:120])
-                    # Always show errors/warnings and periodic heartbeat
-                    now = time.time()
-                    is_important = any(kw in stripped.lower() for kw in ("error", "warning", "link", "note:", "fatal"))
-                    if is_important or now - last_info_time >= INFO_INTERVAL:
-                        last_info_time = now
-                        await ctx.info(stripped[:200])
+                    await ctx.info(line.rstrip())
 
         rc = await asyncio.wait_for(proc.wait(), timeout=timeout)
 
