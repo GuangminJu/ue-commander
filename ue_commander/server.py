@@ -5,12 +5,17 @@ Design principle: AI should never need to know the exact paths or command syntax
 Every operation goes through this server, which uses the detected config.
 """
 
-from pathlib import Path
+from typing import Literal
+import threading
 
-from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.fastmcp import FastMCP
 
 from .config import detect_config, find_uproject, BuildConfig, BuildPlatform, BuildTarget
-from . import ue_process, ue_build, ue_discover, ue_editor
+from . import ue_process, ue_build, ue_discover, ue_editor, ue_debug
+from .bridge.capability_registry import CapabilityRegistry
+from .bridge.plugin_bridge import PluginBridge
+from .ue_build_session import BuildSessionStore
+from .ue_launch_session import LaunchSessionStore
 
 mcp = FastMCP(
     name="ue-commander",
@@ -23,8 +28,13 @@ mcp = FastMCP(
     ),
 )
 
+_capability_registry = CapabilityRegistry()
+_plugin_bridge = PluginBridge(mcp, _capability_registry)
+
 # Lazy-init config — resolved once per server session
 _cfg = None
+_build_store = None
+_launch_store = None
 
 
 def _get_cfg():
@@ -35,21 +45,379 @@ def _get_cfg():
     return _cfg
 
 
+def _get_build_store():
+    global _build_store
+    if _build_store is None:
+        _build_store = BuildSessionStore(_get_cfg())
+    return _build_store
+
+
+def _get_launch_store():
+    global _launch_store
+    if _launch_store is None:
+        _launch_store = LaunchSessionStore(_get_cfg())
+    return _launch_store
+
+
+def _derive_launch_phase(plugin_ready: bool, game_thread_ok: bool, editor_running: bool) -> str:
+    if not editor_running:
+        return "closed"
+    if plugin_ready and game_thread_ok:
+        return "ready"
+    if plugin_ready and not game_thread_ok:
+        return "blocked"
+    return "loading"
+
+
+def _build_session_response(session, *, include_full_log: bool) -> dict:
+    import os
+
+    log_text = ""
+    if session.log_path and os.path.exists(session.log_path):
+        try:
+            with open(session.log_path, encoding="utf-8", errors="replace") as f:
+                log_text = f.read()
+        except Exception:
+            pass
+
+    response = {
+        "build_id": session.build_id,
+        "running": session.status in {"queued", "running"},
+        "status": session.status,
+        "result": session.result,
+        "ok": session.result == "succeeded",
+        "started_at": session.started_at,
+        "finished_at": session.finished_at,
+        "config": session.config,
+        "target": session.target,
+        "platform": session.platform,
+        "project_path": session.project_path,
+        "command": session.command,
+        "log_path": session.log_path,
+        "log_file": session.log_path,
+        "exit_code": session.exit_code,
+        "return_code": session.exit_code,
+        "artifact_status": session.artifact_status,
+        "error_count": session.errors,
+        "warning_count": session.warnings,
+        "errors": session.error_lines,
+        "warnings": session.warning_lines,
+    }
+    if include_full_log:
+        response["log"] = log_text if log_text else session.output_tail
+    elif session.status in {"queued", "running"}:
+        response["log_tail"] = "".join(log_text.splitlines(keepends=True)[-30:])
+    return response
+
+
+def _capability_step(tool_name: str, *, purpose: str, params: dict | None = None, optional: bool = False) -> dict:
+    capability = _capability_registry.get(f"ue_{tool_name.lower()}")
+    step = {
+        "tool": capability.name if capability is not None else tool_name,
+        "mcp_tool": f"ue_{tool_name.lower()}",
+        "purpose": purpose,
+        "optional": optional,
+        "params": params or {},
+    }
+    if capability is not None:
+        step["category"] = capability.category
+        step["workflow_hint"] = capability.workflow_hint
+        step["recommended_reads"] = capability.recommended_reads
+    return step
+
+
+def _blueprint_mutation_policy() -> dict:
+    return {
+        "preferred_path": [
+            "GetBlueprintInfo",
+            "ListBlueprintGraphs",
+            "ListBlueprintNodes",
+            "GetBlueprintGraph",
+            "AddBlueprintNodeByType",
+            "ConnectBlueprintPinsByGuid",
+            "SetBlueprintPinValueByGuid",
+            "RemoveBlueprintNodeByGuid",
+            "CompileBlueprint",
+            "ValidateBlueprintDeep",
+        ],
+        "compatibility_tools": [
+            "AddBlueprintNode",
+            "ConnectBlueprintPins",
+            "SetBlueprintPinValue",
+        ],
+        "conditional_tools": [
+            "ConnectPinChain",
+            "DisconnectBlueprintPins",
+            "AddBlueprintGenericNode",
+        ],
+        "rules": [
+            "Prefer GUID-based mutation after raw graph reads when exact node identity matters.",
+            "Use name-based mutation tools only as compatibility helpers for simple, unambiguous graphs.",
+            "Use escape-hatch and batch rewiring tools only when specialized structured tools are insufficient.",
+            "Compile and deep-validate after structural Blueprint edits before handoff.",
+        ],
+    }
+
+
+def _widget_interaction_policy() -> dict:
+    return {
+        "preferred_path": [
+            "SearchWidgets",
+            "FocusWidget",
+            "TypeText",
+            "ClickWidget",
+            "PressKey",
+            "TakeScreenshot",
+        ],
+        "conditional_tools": [
+            "DoubleClickWidget",
+            "DragWidget",
+            "ScrollWidget",
+        ],
+        "rules": [
+            "Locate the widget first before trying to click, type, or drag.",
+            "Set focus before keyboard or text input when the target control is ambiguous.",
+            "Use drag, double-click, and scroll only when the UI flow specifically requires those gestures.",
+            "Capture a screenshot or read widget state after mutation when visual confirmation matters.",
+        ],
+    }
+
+
+def _normalize_widget_workflow_intent(intent: str) -> str:
+    normalized = (intent or "").strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "inspect": "inspect_widget",
+        "inspect_widget": "inspect_widget",
+        "click": "click_widget_flow",
+        "click_widget": "click_widget_flow",
+        "click_widget_flow": "click_widget_flow",
+        "type": "text_input_flow",
+        "text_input": "text_input_flow",
+        "text_input_flow": "text_input_flow",
+        "drag": "drag_widget_flow",
+        "drag_widget": "drag_widget_flow",
+        "drag_widget_flow": "drag_widget_flow",
+    }
+    return aliases.get(normalized, normalized)
+
+
+def _widget_workflow_steps(intent: str, query: str, widget_path: str) -> list[dict]:
+    if intent == "inspect_widget":
+        return [
+            _capability_step("search_widgets", purpose="Locate candidate widgets by text or type before interaction.", params={"query": query}),
+            _capability_step("take_screenshot", purpose="Capture the widget or window for visual confirmation after discovery.", params={"widget_path": widget_path}, optional=True),
+        ]
+    if intent == "click_widget_flow":
+        return [
+            _capability_step("search_widgets", purpose="Locate the target widget before clicking.", params={"query": query}),
+            _capability_step("focus_widget", purpose="Move focus to the target widget when focus state matters.", params={"widget_path": widget_path}, optional=True),
+            _capability_step("click_widget", purpose="Perform the primary click interaction on the resolved widget.", params={"widget_path": widget_path}),
+            _capability_step("take_screenshot", purpose="Capture the post-click UI state when confirmation is needed.", params={"widget_path": widget_path}, optional=True),
+        ]
+    if intent == "text_input_flow":
+        return [
+            _capability_step("search_widgets", purpose="Locate the target text widget before sending input.", params={"query": query}),
+            _capability_step("focus_widget", purpose="Ensure the correct widget owns keyboard focus.", params={"widget_path": widget_path}),
+            _capability_step("type_text", purpose="Send the desired text to the focused widget.", params={"widget_path": widget_path}),
+            _capability_step("press_key", purpose="Send follow-up keys such as Enter or Tab if the flow needs them.", params={"widget_path": widget_path}, optional=True),
+            _capability_step("take_screenshot", purpose="Capture the resulting UI state after text input.", params={"widget_path": widget_path}, optional=True),
+        ]
+    if intent == "drag_widget_flow":
+        return [
+            _capability_step("search_widgets", purpose="Locate the widgets involved in the drag flow.", params={"query": query}),
+            _capability_step("drag_widget", purpose="Execute the drag-and-drop interaction.", params={"source_path": widget_path}, optional=False),
+            _capability_step("scroll_widget", purpose="Scroll if the drop target is off-screen or clipped.", params={"widget_path": widget_path}, optional=True),
+            _capability_step("take_screenshot", purpose="Capture the UI state after drag-and-drop completes.", params={"widget_path": widget_path}, optional=True),
+        ]
+    raise ValueError(f"Unsupported widget workflow intent: {intent}")
+
+
+def _normalize_blueprint_workflow_intent(intent: str) -> str:
+    normalized = (intent or "").strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "inspect": "inspect_blueprint",
+        "read": "inspect_blueprint",
+        "inspect_blueprint": "inspect_blueprint",
+        "edit": "guided_graph_edit",
+        "edit_graph": "guided_graph_edit",
+        "guided_graph_edit": "guided_graph_edit",
+        "guid_edit": "guided_graph_edit",
+        "add_function": "create_function_flow",
+        "create_function": "create_function_flow",
+        "create_function_flow": "create_function_flow",
+        "disconnect": "disconnect_pin_flow",
+        "disconnect_pin": "disconnect_pin_flow",
+        "disconnect_pin_flow": "disconnect_pin_flow",
+        "replace_node": "replace_node_flow",
+        "replace_node_flow": "replace_node_flow",
+        "event_entry": "event_entry_flow",
+        "event_entry_flow": "event_entry_flow",
+        "function_signature": "function_signature_flow",
+        "function_signature_flow": "function_signature_flow",
+        "default_value": "default_value_flow",
+        "default_pin_value": "default_value_flow",
+        "default_value_flow": "default_value_flow",
+        "set_pin": "set_pin_value_flow",
+        "set_pin_value": "set_pin_value_flow",
+        "set_pin_value_flow": "set_pin_value_flow",
+    }
+    return aliases.get(normalized, normalized)
+
+
+def _blueprint_workflow_steps(intent: str, blueprint_path: str, graph_name: str) -> list[dict]:
+    if intent == "inspect_blueprint":
+        return [
+            _capability_step("get_blueprint_info", purpose="Read Blueprint resource summary first.", params={"blueprint_path": blueprint_path, "detail_level": "summary"}),
+            _capability_step("list_blueprint_graphs", purpose="Choose the target graph without loading raw graph state.", params={"blueprint_path": blueprint_path, "detail_level": "summary"}),
+            _capability_step("list_blueprint_nodes", purpose="Inspect node index and pin counts before heavier reads.", params={"blueprint_path": blueprint_path, "graph_name": graph_name, "detail_level": "detail"}),
+            _capability_step("get_blueprint_graph", purpose="Escalate to raw graph only if exact GUID-level links are required.", params={"blueprint_path": blueprint_path, "graph_name": graph_name, "detail_level": "raw"}, optional=True),
+        ]
+    if intent == "guided_graph_edit":
+        return [
+            _capability_step("get_blueprint_info", purpose="Confirm Blueprint identity and overall shape.", params={"blueprint_path": blueprint_path, "detail_level": "summary"}),
+            _capability_step("list_blueprint_graphs", purpose="Pick the graph to mutate.", params={"blueprint_path": blueprint_path, "detail_level": "summary"}),
+            _capability_step("list_blueprint_nodes", purpose="Read node index before adding or wiring nodes.", params={"blueprint_path": blueprint_path, "graph_name": graph_name, "detail_level": "detail"}),
+            _capability_step("add_blueprint_node_by_type", purpose="Create structured graph nodes with stable GUIDs.", params={"blueprint_path": blueprint_path, "graph_name": graph_name}),
+            _capability_step("get_blueprint_graph", purpose="Fetch raw graph state when exact GUID connections are needed.", params={"blueprint_path": blueprint_path, "graph_name": graph_name, "detail_level": "raw"}),
+            _capability_step("connect_blueprint_pins_by_guid", purpose="Perform precise pin connections using GUIDs from the raw graph.", params={"blueprint_path": blueprint_path, "graph_name": graph_name}),
+            _capability_step("auto_layout_blueprint_graph", purpose="Normalize graph layout after structural edits.", params={"blueprint_path": blueprint_path, "graph_name": graph_name}),
+            _capability_step("compile_blueprint", purpose="Surface compile regressions immediately after edits.", params={"blueprint_path": blueprint_path}),
+            _capability_step("validate_blueprint_deep", purpose="Catch broken pins, phantom errors, and duplicate names before handoff.", params={"blueprint_path": blueprint_path, "b_auto_fix": False}),
+        ]
+    if intent == "create_function_flow":
+        return [
+            _capability_step("get_blueprint_info", purpose="Inspect Blueprint structure before adding a new function graph.", params={"blueprint_path": blueprint_path, "detail_level": "summary"}),
+            _capability_step("list_blueprint_graphs", purpose="Read current graph index to avoid naming collisions.", params={"blueprint_path": blueprint_path, "detail_level": "detail"}),
+            _capability_step("create_blueprint_function", purpose="Create the target function graph.", params={"blueprint_path": blueprint_path}),
+            _capability_step("modify_blueprint_function_params", purpose="Adjust function inputs or outputs after graph creation.", params={"blueprint_path": blueprint_path}, optional=True),
+            _capability_step("list_blueprint_nodes", purpose="Inspect the new function graph before inserting logic.", params={"blueprint_path": blueprint_path, "graph_name": graph_name, "detail_level": "detail"}),
+            _capability_step("add_blueprint_node_by_type", purpose="Insert function body nodes.", params={"blueprint_path": blueprint_path, "graph_name": graph_name}),
+            _capability_step("auto_layout_blueprint_graph", purpose="Keep the new function graph readable.", params={"blueprint_path": blueprint_path, "graph_name": graph_name}),
+            _capability_step("compile_blueprint", purpose="Compile after function creation and graph edits.", params={"blueprint_path": blueprint_path}),
+            _capability_step("validate_blueprint_deep", purpose="Run deep validation before using the new function downstream.", params={"blueprint_path": blueprint_path, "b_auto_fix": False}),
+        ]
+    if intent == "event_entry_flow":
+        return [
+            _capability_step("get_blueprint_info", purpose="Confirm the Blueprint target before adding an event entry.", params={"blueprint_path": blueprint_path, "detail_level": "summary"}),
+            _capability_step("list_blueprint_graphs", purpose="Select the graph that should receive the custom event.", params={"blueprint_path": blueprint_path, "detail_level": "summary"}),
+            _capability_step("list_blueprint_nodes", purpose="Inspect the existing graph before inserting a new event entry node.", params={"blueprint_path": blueprint_path, "graph_name": graph_name, "detail_level": "detail"}),
+            _capability_step("create_blueprint_custom_event", purpose="Create the custom event entry point in the target graph.", params={"blueprint_path": blueprint_path, "graph_name": graph_name}),
+            _capability_step("add_blueprint_node_by_type", purpose="Insert downstream logic that the custom event should drive.", params={"blueprint_path": blueprint_path, "graph_name": graph_name}),
+            _capability_step("get_blueprint_graph", purpose="Fetch raw graph state if the new event must be wired by GUID.", params={"blueprint_path": blueprint_path, "graph_name": graph_name, "detail_level": "raw"}),
+            _capability_step("connect_blueprint_pins_by_guid", purpose="Connect the custom event to the new downstream logic precisely.", params={"blueprint_path": blueprint_path, "graph_name": graph_name}),
+            _capability_step("auto_layout_blueprint_graph", purpose="Keep the entry flow readable after event insertion.", params={"blueprint_path": blueprint_path, "graph_name": graph_name}),
+            _capability_step("compile_blueprint", purpose="Compile after adding the event entry flow.", params={"blueprint_path": blueprint_path}),
+            _capability_step("validate_blueprint_deep", purpose="Validate after event insertion to catch broken execution links.", params={"blueprint_path": blueprint_path, "b_auto_fix": False}),
+        ]
+    if intent == "default_value_flow":
+        return [
+            _capability_step("get_blueprint_info", purpose="Confirm the Blueprint target before editing pin defaults.", params={"blueprint_path": blueprint_path, "detail_level": "summary"}),
+            _capability_step("list_blueprint_nodes", purpose="Inspect the target graph to locate the node and target pin.", params={"blueprint_path": blueprint_path, "graph_name": graph_name, "detail_level": "detail"}),
+            _capability_step("set_blueprint_pin_value", purpose="Compatibility path for simple name-based pin default edits.", params={"blueprint_path": blueprint_path, "graph_name": graph_name}, optional=True),
+            _capability_step("get_blueprint_graph", purpose="Escalate to raw graph when exact GUID-level pin editing is required.", params={"blueprint_path": blueprint_path, "graph_name": graph_name, "detail_level": "raw"}),
+            _capability_step("set_blueprint_pin_value_by_guid", purpose="Preferred precise pin default edit using the node GUID.", params={"blueprint_path": blueprint_path, "graph_name": graph_name}),
+            _capability_step("compile_blueprint", purpose="Compile after changing pin defaults.", params={"blueprint_path": blueprint_path}),
+            _capability_step("validate_blueprint_deep", purpose="Validate after the default value update before handoff.", params={"blueprint_path": blueprint_path, "b_auto_fix": False}, optional=True),
+        ]
+    if intent == "set_pin_value_flow":
+        return [
+            _capability_step("get_blueprint_info", purpose="Confirm the Blueprint target before GUID-based pin edits.", params={"blueprint_path": blueprint_path, "detail_level": "summary"}),
+            _capability_step("get_blueprint_graph", purpose="Load raw graph to discover stable node GUIDs and pin names.", params={"blueprint_path": blueprint_path, "graph_name": graph_name, "detail_level": "raw"}),
+            _capability_step("set_blueprint_pin_value_by_guid", purpose="Set the target pin value using exact node GUID and pin name.", params={"blueprint_path": blueprint_path, "graph_name": graph_name}),
+            _capability_step("compile_blueprint", purpose="Compile immediately after mutating pin defaults.", params={"blueprint_path": blueprint_path}),
+            _capability_step("validate_blueprint_deep", purpose="Validate to catch latent graph breakage after the pin update.", params={"blueprint_path": blueprint_path, "b_auto_fix": False}, optional=True),
+        ]
+    if intent == "disconnect_pin_flow":
+        return [
+            _capability_step("get_blueprint_info", purpose="Confirm the Blueprint and avoid rewiring the wrong asset.", params={"blueprint_path": blueprint_path, "detail_level": "summary"}),
+            _capability_step("list_blueprint_graphs", purpose="Select the graph that contains the link to remove.", params={"blueprint_path": blueprint_path, "detail_level": "summary"}),
+            _capability_step("list_blueprint_nodes", purpose="Inspect candidate node names and pins before disconnecting.", params={"blueprint_path": blueprint_path, "graph_name": graph_name, "detail_level": "detail"}),
+            _capability_step("get_blueprint_graph", purpose="Escalate to raw graph if the node has ambiguous wiring.", params={"blueprint_path": blueprint_path, "graph_name": graph_name, "detail_level": "raw"}, optional=True),
+            _capability_step("disconnect_blueprint_pins", purpose="Break the incorrect connection or all links on the target node pin.", params={"blueprint_path": blueprint_path, "graph_name": graph_name}),
+            _capability_step("compile_blueprint", purpose="Compile after disconnecting to surface broken execution paths quickly.", params={"blueprint_path": blueprint_path}),
+            _capability_step("validate_blueprint_deep", purpose="Deep-validate after rewiring cleanup before handoff.", params={"blueprint_path": blueprint_path, "b_auto_fix": False}, optional=True),
+        ]
+    if intent == "replace_node_flow":
+        return [
+            _capability_step("get_blueprint_info", purpose="Confirm the Blueprint target and current asset context.", params={"blueprint_path": blueprint_path, "detail_level": "summary"}),
+            _capability_step("list_blueprint_graphs", purpose="Choose the graph where the node replacement will occur.", params={"blueprint_path": blueprint_path, "detail_level": "summary"}),
+            _capability_step("list_blueprint_nodes", purpose="Inspect the existing node index before replacing anything.", params={"blueprint_path": blueprint_path, "graph_name": graph_name, "detail_level": "detail"}),
+            _capability_step("get_blueprint_graph", purpose="Read raw graph state to capture exact GUIDs and existing links.", params={"blueprint_path": blueprint_path, "graph_name": graph_name, "detail_level": "raw"}),
+            _capability_step("add_blueprint_node_by_type", purpose="Insert the replacement node and capture its GUID.", params={"blueprint_path": blueprint_path, "graph_name": graph_name}),
+            _capability_step("connect_pin_chain", purpose="Reconnect simple name-based links in batch where pin names are stable.", params={"blueprint_path": blueprint_path, "graph_name": graph_name}, optional=True),
+            _capability_step("connect_blueprint_pins_by_guid", purpose="Perform precise reconnects for ambiguous or GUID-level wiring.", params={"blueprint_path": blueprint_path, "graph_name": graph_name}),
+            _capability_step("remove_blueprint_node_by_guid", purpose="Delete the obsolete node after replacement wiring is in place.", params={"blueprint_path": blueprint_path, "graph_name": graph_name}),
+            _capability_step("auto_layout_blueprint_graph", purpose="Clean up graph readability after replacement.", params={"blueprint_path": blueprint_path, "graph_name": graph_name}),
+            _capability_step("compile_blueprint", purpose="Compile immediately after node replacement.", params={"blueprint_path": blueprint_path}),
+            _capability_step("validate_blueprint_deep", purpose="Catch latent pin or type regressions after replacement.", params={"blueprint_path": blueprint_path, "b_auto_fix": False}),
+        ]
+    if intent == "function_signature_flow":
+        return [
+            _capability_step("get_blueprint_info", purpose="Inspect Blueprint detail before editing function signatures.", params={"blueprint_path": blueprint_path, "detail_level": "detail"}),
+            _capability_step("list_blueprint_graphs", purpose="Confirm the target function graph and current signature.", params={"blueprint_path": blueprint_path, "detail_level": "detail"}),
+            _capability_step("modify_blueprint_function_params", purpose="Apply the function input or output signature change.", params={"blueprint_path": blueprint_path}),
+            _capability_step("list_blueprint_graphs", purpose="Re-read graph summaries to confirm the new signature.", params={"blueprint_path": blueprint_path, "detail_level": "detail"}),
+            _capability_step("list_blueprint_nodes", purpose="Inspect the affected function graph for downstream node impacts.", params={"blueprint_path": blueprint_path, "graph_name": graph_name, "detail_level": "detail"}, optional=True),
+            _capability_step("compile_blueprint", purpose="Compile after the signature change to surface broken call sites.", params={"blueprint_path": blueprint_path}),
+            _capability_step("validate_blueprint_deep", purpose="Run deep validation after signature edits before handoff.", params={"blueprint_path": blueprint_path, "b_auto_fix": False}),
+        ]
+    raise ValueError(f"Unsupported Blueprint workflow intent: {intent}")
+
+
 # ---------------------------------------------------------------------------
 # Tools
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-def ue_status() -> dict:
+def ue_status(log_lines: int = 0) -> dict:
     """
     Check whether any Unreal Editor is currently running.
     Returns process info (PID, memory, uptime, which project is loaded) if running.
     Also probes the plugin HTTP endpoint to report whether the editor
     is fully loaded and ready to accept commands (plugin_ready field).
+
+    When the editor is in "loading" phase and log_lines > 0, includes the
+    tail of the editor log so you can monitor startup progress.
+
+    Args:
+        log_lines: Number of log tail lines to include (0 = no log, default).
+                   Useful during loading phase to see startup progress.
     """
     cfg = _get_cfg()
     info = ue_process.get_status(cfg)
-    plugin_ready = ue_editor.is_plugin_available()
+    monitor = ue_process.get_monitor()
+    bridge_state = _plugin_bridge.get_state()
+    plugin_ready = bridge_state.plugin_ready
+    launch_store = _get_launch_store()
+    active_launch = launch_store.find_by_pid(info.pid) or launch_store.get_active_session()
+
+    # Check monitor for crash — but ONLY if the process is actually dead.
+    # If the process is running (new launch), stale monitor crash data
+    # from a previous session must not override the live status.
+    if monitor and monitor.crashed and not info.running:
+        if active_launch is not None:
+            active_launch = launch_store.mark_closed(active_launch.launch_id, phase="failed")
+        result = {
+            "project": info.project or cfg.project_name,
+            "engine_path": str(cfg.engine_path),
+            "editor_running": False,
+            "phase": "crashed",
+            "crash_reason": monitor.crash_reason,
+            "exit_code": monitor.exit_code,
+            "recent_log": monitor.recent_log[-10:],
+        }
+        if cfg.ide_build:
+            result["ide_build_config"] = {
+                "config": cfg.ide_build.config,
+                "target": cfg.ide_build.target,
+                "platform": cfg.ide_build.platform,
+                "detected_from": cfg.ide_build.source,
+            }
+        if active_launch is not None:
+            result["launch_id"] = active_launch.launch_id
+            result["launch_status"] = active_launch.status
+            result["linked_build_id"] = active_launch.linked_build_id
+        return result
 
     # If any UE process is running (even a different project), report it
     editor_running = info.running or plugin_ready
@@ -59,7 +427,18 @@ def ue_status() -> dict:
         "editor_running": editor_running,
     }
     if editor_running:
-        phase = "ready" if plugin_ready else "loading"
+        game_thread_ok = bridge_state.game_thread_responsive
+        phase = _derive_launch_phase(plugin_ready, game_thread_ok, editor_running)
+
+        if active_launch is not None:
+            active_launch = launch_store.update_runtime(
+                active_launch.launch_id,
+                editor_pid=info.pid,
+                launched_by=info.launched_by,
+                plugin_ready=plugin_ready,
+                phase=phase,
+            )
+
         result.update({
             "pid": info.pid,
             "uptime_seconds": info.uptime_seconds,
@@ -67,9 +446,21 @@ def ue_status() -> dict:
             "launched_by": info.launched_by,
             "plugin_ready": plugin_ready,
             "phase": phase,
+            "bridge_state": bridge_state.to_dict(),
         })
+        # Include monitor log tail when loading/blocked
+        if monitor and phase != "ready" and log_lines > 0:
+            result["recent_log"] = monitor.recent_log[-log_lines:]
     else:
+        if active_launch is not None:
+            active_launch = launch_store.mark_closed(active_launch.launch_id)
         result["phase"] = "not_running"
+        result["bridge_state"] = bridge_state.to_dict()
+    if active_launch is not None:
+        result["launch_id"] = active_launch.launch_id
+        result["launch_status"] = active_launch.status
+        result["linked_build_id"] = active_launch.linked_build_id
+        result["launch_started_at"] = active_launch.started_at
     if cfg.ide_build:
         result["ide_build_config"] = {
             "config": cfg.ide_build.config,
@@ -81,24 +472,16 @@ def ue_status() -> dict:
 
 
 @mcp.tool()
-async def ue_launch(
+def ue_launch(
     project_path: str | None = None,
     extra_args: list[str] | None = None,
-    compile_first: bool = False,
-    wait_ready: bool = True,
-    ready_timeout: int = 180,
-    ctx: Context | None = None,
+    linked_build_id: str | None = None,
 ) -> dict:
     """
-    Launch the Unreal Editor for any project.
+    Launch the Unreal Editor. Returns IMMEDIATELY — does NOT block.
 
-    Passes -skipcompile flags to suppress startup prompts.
+    Call ue_status to poll for readiness (check plugin_ready field).
     Call ue_compile BEFORE this if you changed C++ code.
-
-    After launching, waits for the editor to fully load by polling the
-    plugin HTTP endpoint. The response includes:
-      - phase: "ready" (plugin responding), "loading" (timed out), or "crashed_during_startup"
-      - startup_time_seconds: how long it took to become ready
 
     Safety: returns an error (does NOT launch) if the editor is already running,
     preventing duplicate instances.
@@ -106,14 +489,8 @@ async def ue_launch(
     Args:
         project_path: Optional path to a .uproject file or project directory.
                       If omitted, launches the default configured project (OhMyUE).
-                      Example: "C:/Users/14293/Documents/Unreal Projects/SurvivorsRoguelike"
         extra_args: Optional additional arguments passed to UnrealEditor.exe,
                     e.g. ["-log", "-game"]. Leave empty for normal editor launch.
-        compile_first: If True, run UBT compile before launching (slow, blocks for minutes).
-                       Default False — call ue_compile separately for better progress feedback.
-        wait_ready: If True (default), wait for the plugin HTTP endpoint to respond
-                    before returning. Set False for fire-and-forget.
-        ready_timeout: Max seconds to wait for editor readiness. Default 180 (3 min).
     """
     if project_path:
         from pathlib import Path
@@ -129,14 +506,43 @@ async def ue_launch(
         cfg = detect_config(p)
     else:
         cfg = _get_cfg()
-    return await ue_process.launch(
-        cfg, extra_args=extra_args, compile_first=compile_first,
-        wait_ready=wait_ready, ready_timeout=ready_timeout, ctx=ctx,
+    result = ue_process.launch(cfg, extra_args=extra_args)
+    if not result.get("ok"):
+        return result
+
+    build_store = _get_build_store()
+    if linked_build_id:
+        build_session = build_store.get_session(linked_build_id)
+    else:
+        build_session = build_store.get_last_session()
+        if build_session is not None and build_session.result != "succeeded":
+            build_session = None
+    resolved_build_id = build_session.build_id if build_session is not None else None
+
+    log_path = str(cfg.project_path.parent / "Saved" / "Logs" / f"{cfg.project_name}.log")
+    launch_session = _get_launch_store().create_session(
+        editor_pid=result.get("pid"),
+        project_path=str(cfg.project_path),
+        command=result.get("command", ""),
+        launched_by=result.get("launched_by", "ue-commander"),
+        linked_build_id=resolved_build_id,
+        log_path=log_path,
     )
+    result["launch_id"] = launch_session.launch_id
+    result["linked_build_id"] = launch_session.linked_build_id
+    result["phase"] = launch_session.phase
+    result["launch_status"] = launch_session.status
+    result["log_path"] = launch_session.log_path
+    return result
 
 
 @mcp.tool()
-def ue_close(force: bool = False, timeout: int = 30, user_override: bool = False) -> dict:
+def ue_close(
+    force: bool = False,
+    timeout: int = 30,
+    user_override: bool = False,
+    save_mode: Literal["auto_save", "prompt", "discard", "force"] = "auto_save",
+) -> dict:
     """
     Close the Unreal Editor for this project.
 
@@ -155,25 +561,37 @@ def ue_close(force: bool = False, timeout: int = 30, user_override: bool = False
         user_override: Set to True ONLY when the user explicitly asks you to
                        close their manually-launched editor. Never set this
                        on your own initiative.
+        save_mode: Shutdown save policy. `auto_save` saves without prompting,
+                   `prompt` asks via UE save dialog, `discard` closes without saving,
+                   and `force` immediately kills the process.
     """
     cfg = _get_cfg()
-    return ue_process.close(cfg, force=force, timeout=timeout, user_override=user_override)
+    proc_info = ue_process.get_status(cfg)
+    active_launch = _get_launch_store().find_by_pid(proc_info.pid) if proc_info.running else _get_launch_store().get_active_session()
+    result = ue_process.close(cfg, force=force, timeout=timeout, user_override=user_override, save_mode=save_mode)
+    if result.get("ok") and active_launch is not None:
+        _get_launch_store().mark_closed(active_launch.launch_id)
+        result["launch_id"] = active_launch.launch_id
+    return result
 
 
 @mcp.tool()
-def ue_close_all(force: bool = False) -> dict:
+def ue_close_all(
+    force: bool = False,
+    timeout: int = 30,
+    save_mode: Literal["auto_save", "prompt", "discard", "force"] = "discard",
+) -> dict:
     """
     Close ALL running Unreal Editor instances on this machine.
     Use this when multiple UE windows are open and need to be cleaned up.
 
     Args:
         force: If True, kill all instances immediately.
+        timeout: Seconds to wait for graceful or terminate-based shutdown.
+        save_mode: Bulk shutdown save policy. `discard` is the default because
+                   multi-instance auto-save/prompt cannot be guaranteed.
     """
-    return ue_process.close_all_ue(force=force)
-
-
-# Module-level compile state — tracks the background build process
-_compile_state: dict = {"task": None, "result": None, "running": False, "log_path": ""}
+    return ue_process.close_all_ue(force=force, timeout=timeout, save_mode=save_mode)
 
 
 @mcp.tool()
@@ -187,17 +605,24 @@ def ue_compile(
     Start a background C++ compilation and return IMMEDIATELY.
 
     Does NOT block — returns as soon as UBT is launched.
-    Poll ue_compile_status to check if compilation finished and read errors.
+    Prefer ue_build_sessions to inspect compilation progress and results.
+    ue_compile_status remains available as a compatibility shim.
 
     Valid values:
       config:   Debug | DebugGame | Development | Shipping | Test
       target:   Editor | Game | Client | Server
       platform: Win64 | Win32 | Mac | Linux
     """
-    import asyncio, threading, tempfile, os
+    import os
 
-    if _compile_state["running"]:
-        return {"ok": False, "error": "Compilation already running. Call ue_compile_status to check progress."}
+    build_store = _get_build_store()
+    if build_store.has_running():
+        active = build_store.get_active_session()
+        return {
+            "ok": False,
+            "error": "Compilation already running. Call ue_build_sessions to inspect the active session.",
+            "build_id": active.build_id if active else None,
+        }
 
     cfg = _get_cfg()
     ide = cfg.ide_build
@@ -205,35 +630,47 @@ def ue_compile(
     resolved_target: BuildTarget = target or (ide.target if ide else "Editor")
     resolved_platform: BuildPlatform = platform or (ide.platform if ide else "Win64")
 
-    log_path = os.path.join(tempfile.gettempdir(), "ue_compile_output.log")
-    _compile_state["running"] = True
-    _compile_state["result"] = None
-    _compile_state["log_path"] = log_path
+    session = build_store.create_session(
+        config=resolved_config,
+        target=resolved_target,
+        platform=resolved_platform,
+        project_path=str(cfg.project_path),
+    )
+    log_path = session.log_path
 
     def _run():
         import asyncio as _asyncio
         loop = _asyncio.new_event_loop()
-        result = loop.run_until_complete(ue_build.compile(
-            cfg,
-            config=resolved_config,
-            target=resolved_target,
-            platform=resolved_platform,
-            timeout=timeout,
-        ))
-        # Write full output to log file
-        with open(log_path, "w", encoding="utf-8") as f:
-            f.write(result.output_tail)
-        _compile_state["result"] = result
-        _compile_state["running"] = False
-        loop.close()
+        try:
+            result = loop.run_until_complete(ue_build.compile(
+                cfg,
+                config=resolved_config,
+                target=resolved_target,
+                platform=resolved_platform,
+                timeout=timeout,
+            ))
+            with open(log_path, "w", encoding="utf-8") as f:
+                f.write(result.output_tail)
+            build_store.finalize(session.build_id, result)
+        except Exception as exc:
+            try:
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(f"\n[ue-commander] build session failed unexpectedly: {exc}\n")
+            except Exception:
+                pass
+            build_store.mark_failed(session.build_id, f"Build session failed unexpectedly: {exc}")
+        finally:
+            loop.close()
 
     t = threading.Thread(target=_run, daemon=True)
+    build_store.mark_running(session.build_id, t)
     t.start()
 
     return {
         "ok": True,
+        "build_id": session.build_id,
         "status": "started",
-        "message": "Compilation started in background. Call ue_compile_status to check progress.",
+        "message": "Compilation started in background. Call ue_build_sessions to inspect progress.",
         "log_file": log_path,
         "config": resolved_config,
         "target": resolved_target,
@@ -242,50 +679,55 @@ def ue_compile(
 
 
 @mcp.tool()
-def ue_compile_status() -> dict:
+def ue_compile_status(build_id: str | None = None) -> dict:
     """
-    Check the status of the background compilation started by ue_compile.
+    Compatibility shim for checking one build session.
 
-    Returns running=true if still compiling, or the full result when done.
-    Call this repeatedly until running=false.
+    Prefer ue_build_sessions for the canonical build-session interface.
+    If build_id is omitted, returns the current active build or the most recent build.
     """
-    import os
+    build_store = _get_build_store()
+    session = build_store.get_session(build_id) if build_id else build_store.get_active_session()
+    if session is None:
+        session = build_store.get_last_session()
+    if session is None:
+        return {
+            "running": False,
+            "status": "not_started",
+            "deprecated": True,
+            "canonical_tool": "ue_build_sessions",
+        }
 
-    if _compile_state["running"]:
-        # Read partial log if available
-        log_path = _compile_state.get("log_path", "")
-        tail = ""
-        if log_path and os.path.exists(log_path):
-            try:
-                with open(log_path, encoding="utf-8", errors="replace") as f:
-                    lines = f.readlines()
-                tail = "".join(lines[-30:])
-            except Exception:
-                pass
-        return {"running": True, "status": "compiling", "log_tail": tail}
+    response = _build_session_response(session, include_full_log=session.status not in {"queued", "running"})
+    response["deprecated"] = True
+    response["canonical_tool"] = "ue_build_sessions"
+    return response
 
-    result = _compile_state.get("result")
-    if result is None:
-        return {"running": False, "status": "not_started"}
 
-    log_path = _compile_state.get("log_path", "")
-    full_log = ""
-    if log_path and os.path.exists(log_path):
-        try:
-            with open(log_path, encoding="utf-8", errors="replace") as f:
-                full_log = f.read()
-        except Exception:
-            pass
+@mcp.tool()
+def ue_build_sessions(limit: int = 10, build_id: str | None = None) -> dict:
+    """
+    List recent build sessions for the current project.
+    This is the canonical interface for build-session inspection.
 
+    Args:
+        limit: Max sessions to return when build_id is not provided.
+        build_id: Optional specific build session to fetch.
+    """
+    build_store = _get_build_store()
+    if build_id:
+        session = build_store.get_session(build_id)
+        sessions = [_build_session_response(session, include_full_log=session.status not in {"queued", "running"})] if session else []
+    else:
+        sessions = [
+            _build_session_response(session, include_full_log=False)
+            for session in build_store.list_sessions(limit=max(1, min(limit, 20)))
+        ]
     return {
-        "running": False,
-        "ok": result.ok,
-        "return_code": result.return_code,
-        "error_count": len(result.errors),
-        "warning_count": len(result.warnings),
-        "errors": result.errors,
-        "warnings": result.warnings,
-        "log": full_log if full_log else result.output_tail,
+        "ok": True,
+        "count": len(sessions),
+        "canonical": True,
+        "sessions": sessions,
     }
 
 
@@ -466,24 +908,128 @@ def ue_plugin_status() -> dict:
     Returns the list of available plugin tools if connected.
     Also checks for crash info if the plugin is not reachable.
     """
-    # First check if there's a crash file from a previous crash
-    crash = ue_editor.read_crash_info()
-    if crash is not None:
+    return _plugin_bridge.plugin_status()
+
+
+@mcp.tool()
+def ue_list_capabilities(include_core: bool = True, include_plugin: bool = True) -> dict:
+    """
+    Return normalized capability metadata for the current MCP surface.
+    Core capabilities are always listed. Plugin capabilities appear when they
+    have been discovered from a reachable UE editor session.
+
+    Args:
+        include_core: Include process/runtime capabilities owned by the Python server.
+        include_plugin: Include editor/plugin capabilities discovered from UE.
+    """
+    if include_plugin:
+        _plugin_bridge.refresh_plugin_tools()
+    return _plugin_bridge.list_capabilities(include_core=include_core, include_plugin=include_plugin)
+
+
+@mcp.tool()
+def ue_blueprint_workflow(
+    intent: str = "guided_graph_edit",
+    blueprint_path: str = "",
+    graph_name: str = "EventGraph",
+) -> dict:
+    """
+    Return a recommended Blueprint read/edit/verify workflow for a common task.
+
+    This planner turns plugin capability metadata into a stable step sequence so
+    agents do not need to infer Blueprint editing order from raw tool lists.
+
+    Args:
+        intent: One of inspect_blueprint, guided_graph_edit, create_function_flow,
+                event_entry_flow, default_value_flow, set_pin_value_flow,
+                disconnect_pin_flow, replace_node_flow, or function_signature_flow.
+                Common aliases such as inspect, edit_graph, add_function,
+                event_entry, default_value, disconnect_pin, replace_node,
+                and set_pin_value are accepted.
+        blueprint_path: Optional target Blueprint asset path.
+        graph_name: Target graph name for graph-scoped workflows.
+    """
+    normalized_intent = _normalize_blueprint_workflow_intent(intent)
+    supported = [
+        "inspect_blueprint",
+        "guided_graph_edit",
+        "create_function_flow",
+        "event_entry_flow",
+        "default_value_flow",
+        "set_pin_value_flow",
+        "disconnect_pin_flow",
+        "replace_node_flow",
+        "function_signature_flow",
+    ]
+    if normalized_intent not in supported:
         return {
             "ok": False,
-            "crashed": True,
-            "crash_info": crash,
-            "hint": "UE crashed. Check crash_info for details. "
-                    "Fix the issue and relaunch UE.",
+            "error": f"Unsupported Blueprint workflow intent: {intent}",
+            "supported_intents": supported,
         }
 
-    if not ue_editor.is_plugin_available():
+    _plugin_bridge.refresh_plugin_tools()
+    steps = _blueprint_workflow_steps(normalized_intent, blueprint_path, graph_name)
+    return {
+        "ok": True,
+        "intent": normalized_intent,
+        "blueprint_path": blueprint_path,
+        "graph_name": graph_name,
+        "policy": _blueprint_mutation_policy(),
+        "phases": {
+            "read": [step for step in steps if ".read." in step.get("category", "")],
+            "mutate": [step for step in steps if ".edit." in step.get("category", "") and "validate" not in step.get("category", "") and "compile" not in step.get("category", "")],
+            "verify": [step for step in steps if step.get("tool") in {"CompileBlueprint", "ValidateBlueprintDeep"}],
+        },
+        "steps": steps,
+    }
+
+
+@mcp.tool()
+def ue_widget_interaction_workflow(
+    intent: str = "click_widget_flow",
+    query: str = "",
+    widget_path: str = "",
+) -> dict:
+    """
+    Return a recommended widget discovery/interact/verify workflow for common UI tasks.
+
+    Args:
+        intent: One of inspect_widget, click_widget_flow, text_input_flow, or
+                drag_widget_flow. Aliases such as inspect, click_widget, type,
+                text_input, drag, and drag_widget are also accepted.
+        query: Optional widget search query used for discovery-oriented steps.
+        widget_path: Optional concrete widget path for direct interaction steps.
+    """
+    normalized_intent = _normalize_widget_workflow_intent(intent)
+    supported = [
+        "inspect_widget",
+        "click_widget_flow",
+        "text_input_flow",
+        "drag_widget_flow",
+    ]
+    if normalized_intent not in supported:
         return {
             "ok": False,
-            "error": "Plugin not reachable. Is UE running with OhMyUnrealEngine loaded?",
+            "error": f"Unsupported widget workflow intent: {intent}",
+            "supported_intents": supported,
         }
-    tools = ue_editor.list_plugin_tools()
-    return {"ok": True, **tools}
+
+    _plugin_bridge.refresh_plugin_tools()
+    steps = _widget_workflow_steps(normalized_intent, query, widget_path)
+    return {
+        "ok": True,
+        "intent": normalized_intent,
+        "query": query,
+        "widget_path": widget_path,
+        "policy": _widget_interaction_policy(),
+        "phases": {
+            "discover": [step for step in steps if ".read." in step.get("category", "") or step.get("tool") == "SearchWidgets"],
+            "interact": [step for step in steps if ".edit." in step.get("category", "") or step.get("tool") in {"FocusWidget", "ClickWidget", "TypeText", "PressKey", "DragWidget", "ScrollWidget"}],
+            "verify": [step for step in steps if step.get("tool") == "TakeScreenshot"],
+        },
+        "steps": steps,
+    }
 
 
 @mcp.tool()
@@ -500,6 +1046,177 @@ def ue_clear_crash() -> dict:
         "cleared": crash is not None,
         "previous_crash": crash,
     }
+
+
+@mcp.tool()
+def ue_auto_layout_blueprint_graph(
+    blueprint_path: str = "",
+    graph_name: str = "",
+    col_spacing: int = 0,
+    row_spacing: int = 0,
+) -> dict:
+    """Auto-layout Blueprint graph nodes using layered topological sort. Call after building a Blueprint to produce clean, readable node positions."""
+    return ue_editor.call_plugin(
+        "AutoLayoutBlueprintGraph",
+        BlueprintPath=blueprint_path,
+        GraphName=graph_name,
+        ColSpacing=col_spacing,
+        RowSpacing=row_spacing,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Scene SDF analysis tools
+# ---------------------------------------------------------------------------
+
+_cached_sdf = None  # type: ignore
+
+
+@mcp.tool()
+def sdf_snapshot(voxel_size: float = 100.0) -> str:
+    """
+    Capture scene and build SDF using per-mesh distance fields (fast, CPU-only).
+    Call this first before any sdf_* queries.
+    voxel_size: Resolution in cm (100=1m, 50=0.5m). Smaller = more detail but slower.
+    Returns an overview of the scene after building the SDF.
+    """
+    from . import scene_sdf as _sdf_mod
+    import json as _json
+
+    response = ue_editor.call_plugin(
+        "BuildSceneSDF",
+        VoxelSize=voxel_size,
+        bIncludeActorMeta=True,
+        bIncludeLandscape=True,
+        timeout=120,
+    )
+
+    if "error" in response:
+        return _json.dumps(response)
+
+    global _cached_sdf
+    _cached_sdf = _sdf_mod.SceneSDF.from_probe_response(response)
+
+    analyzer = _sdf_mod.SDFAnalyzer(_cached_sdf)
+    return _json.dumps(analyzer.overview(), indent=2)
+
+
+@mcp.tool()
+def sdf_overview() -> str:
+    """Get scene overview statistics from the cached SDF (call sdf_snapshot first)."""
+    import json as _json
+    from . import scene_sdf as _sdf_mod
+    if _cached_sdf is None:
+        return _json.dumps({"error": "No SDF cached. Call sdf_snapshot first."})
+    return _json.dumps(_sdf_mod.SDFAnalyzer(_cached_sdf).overview(), indent=2)
+
+
+@mcp.tool()
+def sdf_find_spaces(min_volume_m3: float = 10.0) -> str:
+    """Find open rooms, corridors, and chokepoints in the scene (requires scipy)."""
+    import json as _json
+    from . import scene_sdf as _sdf_mod
+    if _cached_sdf is None:
+        return _json.dumps({"error": "No SDF cached. Call sdf_snapshot first."})
+    return _json.dumps(_sdf_mod.SDFAnalyzer(_cached_sdf).find_spaces(min_volume_m3), indent=2)
+
+
+@mcp.tool()
+def sdf_issues() -> str:
+    """Detect layout problems: floating objects, unlit areas, isolated actors."""
+    import json as _json
+    from . import scene_sdf as _sdf_mod
+    if _cached_sdf is None:
+        return _json.dumps({"error": "No SDF cached. Call sdf_snapshot first."})
+    return _json.dumps(_sdf_mod.SDFAnalyzer(_cached_sdf).detect_issues(), indent=2)
+
+
+@mcp.tool()
+def sdf_query_point(x: float = 0, y: float = 0, z: float = 0) -> str:
+    """Sample the SDF at a specific world position (cm). Returns distance, occupied flag, nearest actor, lighting."""
+    import json as _json
+    import numpy as np
+    from . import scene_sdf as _sdf_mod
+    if _cached_sdf is None:
+        return _json.dumps({"error": "No SDF cached. Call sdf_snapshot first."})
+    sdf = _cached_sdf
+    pos = np.array([x, y, z], dtype=np.float32)
+    distance = sdf.sample(pos)
+    nearest = min(sdf.actors, key=lambda a: float(np.linalg.norm(a.location - pos)),
+                  default=None)
+    lit_by = [a.name for a in sdf.actors
+               if a.attenuation_radius > 0
+               and float(np.linalg.norm(a.location - pos)) < a.attenuation_radius]
+    return _json.dumps({
+        "distance_cm": round(float(distance), 1),
+        "occupied": bool(distance < 0),
+        "nearest_actor": nearest.name if nearest else None,
+        "nearest_actor_distance_cm": round(float(np.linalg.norm(nearest.location - pos)), 1)
+            if nearest else None,
+        "lit": len(lit_by) > 0,
+        "lit_by": lit_by,
+    }, indent=2)
+
+
+@mcp.tool()
+def sdf_trace_ray(
+    origin_x: float = 0, origin_y: float = 0, origin_z: float = 100,
+    dir_x: float = 1, dir_y: float = 0, dir_z: float = 0,
+    max_distance: float = 10000,
+) -> str:
+    """Cast a sphere-trace ray through the SDF and find the first intersection."""
+    import json as _json
+    import numpy as np
+    from . import scene_sdf as _sdf_mod
+    if _cached_sdf is None:
+        return _json.dumps({"error": "No SDF cached. Call sdf_snapshot first."})
+    result = _sdf_mod.SDFAnalyzer(_cached_sdf).trace_ray(
+        np.array([origin_x, origin_y, origin_z]),
+        np.array([dir_x, dir_y, dir_z]),
+        max_distance,
+    )
+    return _json.dumps(result, indent=2)
+
+
+@mcp.tool()
+def sdf_slice(
+    axis: str = "z",
+    position: float = 0,
+    show_actors: bool = True,
+    show_lights: bool = True,
+) -> str:
+    """
+    Generate a 2D cross-section image of the scene SDF (requires matplotlib).
+    axis: 'x', 'y', or 'z'. position: world coordinate in cm.
+    Returns path to the saved PNG image.
+    """
+    import json as _json
+    from . import scene_sdf as _sdf_mod
+    if _cached_sdf is None:
+        return _json.dumps({"error": "No SDF cached. Call sdf_snapshot first."})
+    out = f"sdf_slice_{axis}_{position:.0f}.png"
+    path = _sdf_mod.SDFRenderer(_cached_sdf).render_slice(
+        axis, position, show_actors, show_lights, output_path=out)
+    return _json.dumps({"image_path": path})
+
+
+@mcp.tool()
+def sdf_render_map(
+    height_min: float | None = None,
+    height_max: float | None = None,
+) -> str:
+    """
+    Generate a top-down floor-plan from the SDF (requires matplotlib).
+    height_min/max: optional Z range in cm to project. Returns path to PNG.
+    """
+    import json as _json
+    from . import scene_sdf as _sdf_mod
+    if _cached_sdf is None:
+        return _json.dumps({"error": "No SDF cached. Call sdf_snapshot first."})
+    height_range = (height_min, height_max) if height_min is not None else None
+    path = _sdf_mod.SDFRenderer(_cached_sdf).render_top_down_map(
+        output_path="sdf_topdown.png", height_range=height_range)
+    return _json.dumps({"image_path": path})
 
 
 @mcp.tool()
@@ -529,111 +1246,213 @@ def ue_batch(calls: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Auto-registered plugin tools
-# ---------------------------------------------------------------------------
-# All tools exposed by the UE plugin (via /api/tools) are auto-registered
-# as MCP tools at startup. No manual Python wrappers needed — just add
-# a UFUNCTION(meta=(MCP, Desc="...")) in C++ and it appears here.
-#
-# Python-only tools (compile, launch, status, etc.) are defined above.
+# Debug tools (CDB)
 # ---------------------------------------------------------------------------
 
-import re as _re
-import inspect as _inspect
 
+@mcp.tool()
+def ue_debug_attach() -> str:
+    """
+    Attach a lightweight debugger (CDB) to the running UE editor.
+    The editor process is PAUSED on attach — call ue_debug_continue to resume.
 
-def _pascal_to_snake(name: str) -> str:
-    """Convert PascalCase to snake_case: 'BlueprintPath' -> 'blueprint_path'."""
-    s = _re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", name)
-    s = _re.sub(r"([a-z\d])([A-Z])", r"\1_\2", s)
-    return s.lower()
+    Auto-detects symbol paths for engine and project binaries.
+    Requires 'Debugging Tools for Windows' (Windows SDK component).
+    """
+    cfg = _get_cfg()
+    proc = ue_process.find_project_ue_process(cfg)
+    if not proc:
+        return "No UE process found. Launch the editor first."
 
+    try:
+        session = ue_debug.create_session(proc.pid)
+    except RuntimeError as e:
+        return str(e)
 
-_TYPE_MAP: dict[str, type] = {
-    "FString": str,
-    "bool": bool,
-    "int32": int,
-    "float": float,
-    "double": float,
-}
-
-_TYPE_DEFAULTS: dict[type, object] = {
-    str: "",
-    bool: False,
-    int: 0,
-    float: 0.0,
-}
-
-
-def _make_plugin_tool(tool_name: str, tool_desc: str, params: list[dict]):
-    """Create a function with a real inspect.Signature and register it as MCP tool."""
-    # Prepare parameter metadata
-    p_infos = []
-    for p in params:
-        py_type = _TYPE_MAP.get(p["type"], str)
-        p_infos.append((_pascal_to_snake(p["name"]), p["name"], py_type))
-
-    # Build a real signature so inspect.signature() returns named params
-    sig_params = [
-        _inspect.Parameter(
-            snake, _inspect.Parameter.KEYWORD_ONLY,
-            default=_TYPE_DEFAULTS.get(py_type, ""),
-            annotation=py_type,
-        )
-        for snake, _pascal, py_type in p_infos
+    symbol_paths = [
+        str(cfg.engine_path / "Engine" / "Binaries" / "Win64"),
+        str(cfg.project_path.parent / "Binaries" / "Win64"),
     ]
-    sig = _inspect.Signature(sig_params, return_annotation=dict)
 
-    # Closure captures tool_name + p_infos
-    def tool_fn(**kwargs) -> dict:
-        plugin_kwargs = {}
-        for snake, pascal, _t in p_infos:
-            if snake in kwargs:
-                plugin_kwargs[pascal] = kwargs[snake]
-        return ue_editor.call_plugin(tool_name, **plugin_kwargs)
+    try:
+        output = session.attach(symbol_paths=symbol_paths)
+    except RuntimeError as e:
+        return str(e)
 
-    mcp_name = f"ue_{_pascal_to_snake(tool_name)}"
-    tool_fn.__name__ = mcp_name
-    tool_fn.__qualname__ = mcp_name
-    tool_fn.__doc__ = tool_desc
-    tool_fn.__signature__ = sig
-    # __annotations__ for typing.get_type_hints() used by context detection
-    tool_fn.__annotations__ = {s: t for s, _p, t in p_infos}
-    tool_fn.__annotations__["return"] = dict
-
-    mcp.tool()(tool_fn)
+    return f"Attached to UE (PID {proc.pid}). Process is PAUSED.\n\n{output}"
 
 
-def _register_plugin_tools():
+@mcp.tool()
+def ue_debug_stacks() -> str:
     """
-    Fetch the tool list from the UE plugin and auto-register each one as
-    an MCP tool. Skips tools that already have manual Python definitions.
+    Get call stacks of ALL threads. The process must be paused.
+    Use this to diagnose hangs, deadlocks, or inspect what UE is doing.
     """
-    import sys
+    session = ue_debug.get_session()
+    if not session:
+        return "No debug session. Call ue_debug_attach first."
+    return session.command("~*kb")
 
-    tools_data = ue_editor.list_plugin_tools()
-    if "error" in tools_data:
-        print("[ue-commander] Plugin not reachable, skipping auto-registration.", file=sys.stderr)
-        return 0
 
-    existing = set(mcp._tool_manager._tools.keys())
+@mcp.tool()
+def ue_debug_break() -> str:
+    """
+    Pause the running UE process. Use after ue_debug_continue to pause again.
+    After pausing, use ue_debug_stacks or ue_debug_eval to inspect state.
+    """
+    session = ue_debug.get_session()
+    if not session:
+        return "No debug session. Call ue_debug_attach first."
+    return session.send_break()
 
-    registered = 0
-    for tool in tools_data.get("tools", []):
-        mcp_name = f"ue_{_pascal_to_snake(tool['name'])}"
-        if mcp_name in existing:
-            continue
-        _make_plugin_tool(tool["name"], tool.get("description", ""), tool.get("params", []))
-        registered += 1
 
-    total = len(tools_data.get("tools", []))
-    print(f"[ue-commander] Auto-registered {registered}/{total} plugin tools.", file=sys.stderr)
-    return registered
+@mcp.tool()
+def ue_debug_continue() -> str:
+    """Resume UE execution after a pause or breakpoint hit."""
+    session = ue_debug.get_session()
+    if not session:
+        return "No debug session. Call ue_debug_attach first."
+    return session.command("g")
 
+
+@mcp.tool()
+def ue_debug_eval(expression: str) -> str:
+    """
+    Evaluate a C++ expression in the current debug context.
+    Process must be paused. Uses CDB's ?? (typed expression evaluator).
+
+    Examples:
+      expression="this"           — current object
+      expression="GEngine"        — global engine pointer
+      expression="MyVar.Num()"    — TArray count
+    """
+    session = ue_debug.get_session()
+    if not session:
+        return "No debug session. Call ue_debug_attach first."
+    return session.command(f"?? {expression}")
+
+
+@mcp.tool()
+def ue_debug_breakpoint(action: Literal["set", "remove", "list"] = "list", location: str = "") -> str:
+    """
+    Manage breakpoints.
+
+    Args:
+        action: "set", "remove", or "list"
+        location: For set — symbol name or source:line (e.g. "AActor::BeginPlay", "MyFile.cpp:42").
+                  For remove — breakpoint number from list output.
+
+    Examples:
+        action="set", location="AActor::BeginPlay"
+        action="set", location="`MyActor.cpp:120`"
+        action="list"
+        action="remove", location="0"
+    """
+    session = ue_debug.get_session()
+    if not session:
+        return "No debug session. Call ue_debug_attach first."
+
+    if action == "list":
+        return session.command("bl")
+    elif action == "set":
+        if not location:
+            return "Error: location required for 'set' action."
+        return session.command(f"bp {location}")
+    elif action == "remove":
+        if not location:
+            return "Error: breakpoint number required for 'remove' action."
+        return session.command(f"bc {location}")
+    else:
+        return f"Unknown action '{action}'. Use: set, remove, list."
+
+
+@mcp.tool()
+def ue_debug_command(command: str) -> str:
+    """
+    Send a raw CDB command. Escape hatch for advanced debugging.
+
+    Common commands:
+      ~*kb          — all thread stacks
+      !analyze -v   — automated crash analysis
+      lm            — list loaded modules
+      .sympath      — show symbol search path
+      dt <type>     — display type layout
+      dv            — display local variables
+      !heap -s      — heap summary
+    """
+    session = ue_debug.get_session()
+    if not session:
+        return "No debug session. Call ue_debug_attach first."
+    return session.command(command)
+
+
+@mcp.tool()
+def ue_debug_detach() -> str:
+    """
+    Detach the debugger from UE. The editor continues running normally.
+    Always call this when done debugging.
+    """
+    return ue_debug.close_session()
+
+
+def _register_manual_capabilities() -> None:
+    manual_tools = [
+        ("ue_status", "safe", "fast", False),
+        ("ue_launch", "mutating", "long", False),
+        ("ue_close", "mutating", "normal", False),
+        ("ue_close_all", "destructive", "normal", False),
+        ("ue_compile", "mutating", "long", False),
+        ("ue_compile_status", "safe", "fast", False),
+        ("ue_build_sessions", "safe", "fast", False),
+        ("ue_get_log", "safe", "fast", False),
+        ("ue_get_compile_errors", "safe", "fast", False),
+        ("ue_project_info", "safe", "fast", False),
+        ("ue_discover_all", "safe", "normal", False),
+        ("ue_find_projects", "safe", "normal", False),
+        ("ue_plugin_status", "safe", "fast", True),
+        ("ue_list_capabilities", "safe", "fast", False),
+        ("ue_blueprint_workflow", "safe", "fast", True),
+        ("ue_widget_interaction_workflow", "safe", "fast", True),
+        ("ue_clear_crash", "mutating", "fast", False),
+        ("ue_auto_layout_blueprint_graph", "mutating", "normal", True),
+        ("sdf_snapshot", "mutating", "long", True),
+        ("sdf_overview", "safe", "fast", False),
+        ("sdf_find_spaces", "safe", "normal", False),
+        ("sdf_issues", "safe", "normal", False),
+        ("sdf_query_point", "safe", "fast", False),
+        ("sdf_trace_ray", "safe", "normal", False),
+        ("sdf_slice", "safe", "long", False),
+        ("sdf_render_map", "safe", "long", False),
+        ("ue_batch", "mutating", "long", True),
+        ("ue_debug_attach", "mutating", "normal", False),
+        ("ue_debug_stacks", "safe", "normal", False),
+        ("ue_debug_break", "mutating", "fast", False),
+        ("ue_debug_continue", "mutating", "fast", False),
+        ("ue_debug_eval", "safe", "fast", False),
+        ("ue_debug_breakpoint", "mutating", "fast", False),
+        ("ue_debug_command", "mutating", "normal", False),
+        ("ue_debug_detach", "mutating", "fast", False),
+    ]
+
+    for tool_name, safety, timeout_class, requires_editor in manual_tools:
+        tool = globals()[tool_name]
+        description = (tool.__doc__ or "").strip().splitlines()[0] if tool.__doc__ else tool_name
+        _capability_registry.register_manual_tool(
+            tool_name,
+            description,
+            source="bridge" if requires_editor else "core",
+            availability="online" if requires_editor else "offline",
+            safety=safety,
+            requires_editor=requires_editor,
+            timeout_class=timeout_class,
+        )
+
+
+_register_manual_capabilities()
 
 # Best-effort at import time (UE may not be running yet)
 try:
-    _register_plugin_tools()
+    _plugin_bridge.refresh_plugin_tools()
 except Exception as _e:
     import sys
     print(f"[ue-commander] Auto-registration deferred: {_e}", file=sys.stderr)

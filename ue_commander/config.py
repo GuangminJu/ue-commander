@@ -2,11 +2,10 @@
 UE installation and project config detection.
 
 Engine resolution priority:
-  1. UE_ENGINE_PATH environment variable
-  2. Windows Registry HKCU\\SOFTWARE\\Epic Games\\Unreal Engine\\Builds  (source builds / custom)
-  3. Windows Registry HKLM\\SOFTWARE\\EpicGames\\Unreal Engine\\{version} (Launcher installs)
-  4. Epic Launcher's LauncherInstalled.dat
-  5. Common install paths scan
+  1. Windows Registry HKCU\\SOFTWARE\\Epic Games\\Unreal Engine\\Builds  (source builds / custom)
+  2. Windows Registry HKLM\\SOFTWARE\\EpicGames\\Unreal Engine\\{version} (Launcher installs)
+  3. Epic Launcher's LauncherInstalled.dat
+  4. Common install paths scan
 
 IDE build config detection:
   Reads Rider/CLion workspace.xml to find the active run configuration's
@@ -163,11 +162,6 @@ def _scan_common_paths() -> list[Path]:
 
 
 def _resolve_engine(association: str) -> Path | None:
-    # Env override always wins
-    env = os.environ.get("UE_ENGINE_PATH")
-    if env:
-        return Path(env)
-
     is_guid = association.startswith("{") and association.endswith("}")
 
     if is_guid:
@@ -330,17 +324,8 @@ def find_uproject(start: Path | None = None) -> Path:
         matches = list(directory.glob("*.uproject"))
         if matches:
             return matches[0]
-    env = os.environ.get("UE_PROJECT_PATH")
-    if env:
-        p = Path(env)
-        if p.suffix == ".uproject" and p.exists():
-            return p
-        matches = list(p.glob("*.uproject"))
-        if matches:
-            return matches[0]
     raise RuntimeError(
-        "No .uproject file found. Run from your project directory "
-        "or set UE_PROJECT_PATH environment variable."
+        "No .uproject file found. Run from your project directory."
     )
 
 
@@ -360,9 +345,8 @@ def detect_config(uproject_path: Path) -> UEConfig:
         raise RuntimeError(
             f"Cannot locate Unreal Engine for association '{association}'.\n"
             "Options:\n"
-            "  1. Set UE_ENGINE_PATH=<engine root> environment variable\n"
-            "  2. Run UnrealVersionSelector.exe /register from your engine directory\n"
-            "  3. Install UE via Epic Games Launcher"
+            "  1. Run UnrealVersionSelector.exe /register from your engine directory\n"
+            "  2. Install UE via Epic Games Launcher"
         )
 
     build_bat = engine_path / "Engine/Build/BatchFiles/Build.bat"

@@ -1,17 +1,21 @@
 """
-UE process management: launch, close, status.
+UE process management: launch, close, status, monitoring.
+
+Acts as a lightweight IDE for AI — captures logs, detects crashes,
+monitors process lifecycle. Generic for any UE project.
 
 Key guarantees:
   1. Only ONE UE editor instance per project.
   2. Ownership tracking: AI-launched editors can be AI-closed;
      user-launched editors require explicit user override to close.
+  3. Background log monitoring with crash detection.
 """
 
-import asyncio
 import json
 import subprocess
+import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import psutil
@@ -70,6 +74,122 @@ class UEProcessInfo:
     uptime_seconds: float | None = None
     memory_mb: float | None = None
     launched_by: str | None = None   # "ue-commander" or "user"
+
+
+# ---------------------------------------------------------------------------
+# UEMonitor — background process & log monitor (like an IDE output panel)
+# ---------------------------------------------------------------------------
+
+_CRASH_MARKERS = ["Fatal error!", "Critical error:", "Assertion failed:"]
+_LOG_BUFFER_SIZE = 100  # lines to keep in memory
+
+
+@dataclass
+class UEMonitor:
+    """Monitors a launched UE process: tails log file, detects crashes."""
+    pid: int
+    log_path: Path
+    proc: subprocess.Popen
+
+    alive: bool = True
+    crashed: bool = False
+    crash_reason: str = ""
+    exit_code: int | None = None
+    recent_log: list[str] = field(default_factory=list)
+    _stop: bool = False
+
+    def start(self):
+        t = threading.Thread(target=self._run, daemon=True)
+        t.start()
+
+    def stop(self):
+        self._stop = True
+
+    def get_state(self) -> dict:
+        return {
+            "alive": self.alive,
+            "crashed": self.crashed,
+            "crash_reason": self.crash_reason,
+            "exit_code": self.exit_code,
+            "recent_log": self.recent_log[-20:],
+        }
+
+    def _run(self):
+        # Wait for log file to appear (UE creates it during startup)
+        deadline = time.time() + 60
+        while not self.log_path.exists() and time.time() < deadline and not self._stop:
+            # Also check if process died before log appeared
+            if self.proc.poll() is not None:
+                self.alive = False
+                self.exit_code = self.proc.returncode
+                self.crashed = self.exit_code != 0
+                self.crash_reason = f"Process exited with code {self.exit_code} before log file appeared"
+                return
+            time.sleep(1)
+
+        if not self.log_path.exists():
+            return
+
+        # Tail the log file
+        try:
+            with open(self.log_path, "r", encoding="utf-8", errors="replace") as f:
+                # Skip to end — only process lines written AFTER launch
+                f.seek(0, 2)
+
+                while not self._stop:
+                    # Check process
+                    ret = self.proc.poll()
+                    if ret is not None:
+                        self.alive = False
+                        self.exit_code = ret
+                        # Read remaining lines
+                        for line in f:
+                            self._process_line(line.rstrip("\n\r"))
+                        if ret != 0 and not self.crashed:
+                            self.crashed = True
+                            self.crash_reason = self.crash_reason or f"Process exited with code {ret}"
+                        return
+
+                    # Read new lines
+                    line = f.readline()
+                    if line:
+                        self._process_line(line.rstrip("\n\r"))
+                    else:
+                        time.sleep(0.5)
+        except Exception:
+            pass
+
+    def _process_line(self, line: str):
+        if not line:
+            return
+        self.recent_log.append(line)
+        if len(self.recent_log) > _LOG_BUFFER_SIZE:
+            self.recent_log = self.recent_log[-_LOG_BUFFER_SIZE:]
+        # Crash detection
+        for marker in _CRASH_MARKERS:
+            if marker in line:
+                self.crashed = True
+                self.crash_reason = line.strip()
+                break
+
+
+# Global monitor instance (one per server session)
+_active_monitor: UEMonitor | None = None
+
+
+def get_monitor() -> UEMonitor | None:
+    """Get the active UE monitor, or None if no monitored process."""
+    global _active_monitor
+    if _active_monitor is not None and not _active_monitor.alive and _active_monitor._stop:
+        _active_monitor = None
+    return _active_monitor
+
+
+def _normalize_close_save_mode(save_mode: str) -> str | None:
+    normalized = (save_mode or "auto_save").strip().lower().replace("-", "_").replace(" ", "_")
+    if normalized in {"auto_save", "prompt", "discard", "force"}:
+        return normalized
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -147,30 +267,24 @@ def get_status(cfg: UEConfig) -> UEProcessInfo:
 # ---------------------------------------------------------------------------
 
 # Default args applied to every editor launch.
-# -skipcompile: don't try editor-internal live compile on startup
 _DEFAULT_LAUNCH_ARGS = ["-skipcompile"]
 
 
-async def launch(
+def launch(
     cfg: UEConfig,
     extra_args: list[str] | None = None,
-    compile_first: bool = True,
-    wait_ready: bool = True,
-    ready_timeout: int = 180,
-    ctx=None,
 ) -> dict:
     """
-    Launch UE editor for this project.
+    Launch UE editor for this project. Returns IMMEDIATELY.
 
-    By default, compiles C++ modules BEFORE launching so the editor never
-    shows the "modules are missing / out of date" rebuild dialog.
-
-    After launching, polls the plugin HTTP endpoint until the editor is
-    fully loaded and ready to accept commands (up to ready_timeout seconds).
+    Starts a background monitor that tails the UE log and detects crashes.
+    Call ue_status to poll for readiness and see live state.
 
     Writes a lock file so ue-commander knows it owns this process.
     Returns error if an instance is already running (prevents duplicates).
     """
+    global _active_monitor
+
     existing = find_project_ue_process(cfg)
     if existing:
         ai = _is_ai_launched(cfg, existing.pid)
@@ -182,18 +296,6 @@ async def launch(
             "pid": existing.pid,
             "launched_by": "ue-commander" if ai else "user",
         }
-
-    # Pre-compile if requested (default: yes)
-    if compile_first:
-        from .ue_build import compile as ue_compile
-        compile_result = await ue_compile(cfg, ctx=ctx)
-        if not compile_result.ok:
-            return {
-                "ok": False,
-                "error": "Pre-launch compile failed. Fix errors before launching the editor.",
-                "compile_errors": compile_result.errors[:10],
-                "output_tail": compile_result.output_tail,
-            }
 
     other_ue = find_ue_processes(cfg)
     warning = None
@@ -218,77 +320,35 @@ async def launch(
     # Record ownership
     _write_lock(cfg, proc.pid)
 
-    result = {
+    # Start background monitor
+    log_path = cfg.project_path.parent / "Saved" / "Logs" / f"{cfg.project_name}.log"
+    if _active_monitor is not None:
+        _active_monitor.stop()
+    _active_monitor = UEMonitor(pid=proc.pid, log_path=log_path, proc=proc)
+    _active_monitor.start()
+
+    return {
         "ok": True,
+        "status": "started",
         "pid": proc.pid,
-        "message": f"Launched UnrealEditor for '{cfg.project_name}' (PID {proc.pid}).",
+        "message": f"Editor launched (PID {proc.pid}). Monitoring log. Call ue_status to check.",
         "launched_by": "ue-commander",
         "warning": warning,
         "command": " ".join(str(c) for c in cmd),
     }
-    if compile_first:
-        result["pre_compiled"] = True
-
-    # Wait for editor to be fully ready (plugin HTTP endpoint responding)
-    if wait_ready:
-        from . import ue_editor
-        ready = False
-        start = time.time()
-        poll_interval = 3  # seconds between probes
-        if ctx:
-            await ctx.info(f"Editor process started (PID {proc.pid}). Waiting for it to finish loading...")
-            await ctx.report_progress(0, ready_timeout, "Editor loading...")
-
-        while time.time() - start < ready_timeout:
-            # Check process is still alive
-            if not psutil.pid_exists(proc.pid):
-                result["ok"] = False
-                result["error"] = (
-                    f"Editor process (PID {proc.pid}) exited unexpectedly during startup. "
-                    "Check logs with ue_get_log for details."
-                )
-                result["phase"] = "crashed_during_startup"
-                return result
-
-            if ue_editor.is_plugin_available():
-                ready = True
-                break
-
-            elapsed = int(time.time() - start)
-            if ctx:
-                await ctx.report_progress(elapsed, ready_timeout, f"Editor loading... ({elapsed}s)")
-            await asyncio.sleep(poll_interval)
-
-        elapsed = round(time.time() - start, 1)
-        if ready:
-            result["phase"] = "ready"
-            result["startup_time_seconds"] = elapsed
-            result["message"] = (
-                f"Editor launched and ready (PID {proc.pid}). "
-                f"Startup took {elapsed}s."
-            )
-            if ctx:
-                await ctx.info(f"Editor ready! Startup took {elapsed}s.")
-        else:
-            result["phase"] = "loading"
-            result["message"] = (
-                f"Editor launched (PID {proc.pid}) but plugin did not respond "
-                f"within {ready_timeout}s. Editor may still be loading. "
-                "Use ue_status to check later."
-            )
-            if ctx:
-                await ctx.info(f"Editor still loading after {ready_timeout}s timeout. Use ue_status to check.")
-    else:
-        result["phase"] = "launched"
-
-    return result
 
 
 # ---------------------------------------------------------------------------
 # Close
 # ---------------------------------------------------------------------------
 
-def close(cfg: UEConfig, force: bool = False, timeout: int = 30, user_override: bool = False) -> dict:
+def close(
+    cfg: UEConfig,
+    force: bool = False,
+    timeout: int = 30,
+    user_override: bool = False,
+    save_mode: str = "auto_save",
+) -> dict:
     """
     Close UE editor for this project.
 
@@ -298,6 +358,15 @@ def close(cfg: UEConfig, force: bool = False, timeout: int = 30, user_override: 
 
     This prevents AI from accidentally closing an editor the user opened.
     """
+    normalized_save_mode = _normalize_close_save_mode(save_mode)
+    if normalized_save_mode is None:
+        return {
+            "ok": False,
+            "error": f"Unsupported save_mode '{save_mode}'. Use auto_save, prompt, discard, or force.",
+        }
+
+    global _active_monitor
+
     proc = find_project_ue_process(cfg)
     if not proc:
         all_procs = find_ue_processes(cfg)
@@ -309,6 +378,9 @@ def close(cfg: UEConfig, force: bool = False, timeout: int = 30, user_override: 
                          f"Other UE instances exist (PIDs: {pids}) — close them manually if needed.",
             }
         _clear_lock(cfg)
+        if _active_monitor:
+            _active_monitor.stop()
+            _active_monitor = None
         return {"ok": True, "message": "No UE process was running."}
 
     pid = proc.pid
@@ -329,21 +401,29 @@ def close(cfg: UEConfig, force: bool = False, timeout: int = 30, user_override: 
         }
 
     try:
-        if force:
+        if force or normalized_save_mode == "force":
             proc.kill()
             _clear_lock(cfg)
-            return {"ok": True, "message": f"Force-killed UE process (PID {pid}).", "launched_by": "ue-commander" if ai_launched else "user"}
+            if _active_monitor:
+                _active_monitor.stop()
+                _active_monitor = None
+            return {
+                "ok": True,
+                "message": f"Force-killed UE process (PID {pid}).",
+                "launched_by": "ue-commander" if ai_launched else "user",
+                "save_mode": "force",
+            }
 
-        # Try graceful shutdown via plugin HTTP API first:
-        # SaveAll to avoid save dialog, then RequestExit
+        # Try graceful shutdown via plugin HTTP API first so save mode can be honored.
         closed_via_plugin = False
+        plugin_attempted = False
         try:
             from . import ue_editor
             if ue_editor.is_plugin_available():
-                ue_editor.call_plugin("RequestExit", timeout=10)
-                # Wait briefly for editor to start closing
+                plugin_attempted = True
+                ue_editor.call_plugin("RequestExit", timeout=max(timeout, 10), SaveMode=normalized_save_mode)
                 try:
-                    proc.wait(timeout=5)
+                    proc.wait(timeout=timeout)
                     closed_via_plugin = True
                 except psutil.TimeoutExpired:
                     pass
@@ -352,42 +432,211 @@ def close(cfg: UEConfig, force: bool = False, timeout: int = 30, user_override: 
 
         if closed_via_plugin:
             _clear_lock(cfg)
-            return {"ok": True, "message": f"Closed UE gracefully via plugin (PID {pid}).", "launched_by": "ue-commander" if ai_launched else "user"}
+            if _active_monitor:
+                _active_monitor.stop()
+                _active_monitor = None
+            return {
+                "ok": True,
+                "message": f"Closed UE gracefully via plugin (PID {pid}).",
+                "launched_by": "ue-commander" if ai_launched else "user",
+                "save_mode": normalized_save_mode,
+            }
 
-        # Fallback: OS-level terminate
+        if plugin_attempted and normalized_save_mode == "prompt":
+            return {
+                "ok": False,
+                "error": (
+                    f"Timed out waiting for prompt-based close on UE process (PID {pid}). "
+                    "Editor is still running; user may still be deciding in the save dialog."
+                ),
+                "launched_by": "ue-commander" if ai_launched else "user",
+                "pid": pid,
+                "save_mode": normalized_save_mode,
+                "prompt_pending": True,
+            }
+
+        if normalized_save_mode == "auto_save":
+            return {
+                "ok": False,
+                "error": (
+                    "Cannot guarantee auto-save close because the plugin is unavailable or did not complete in time. "
+                    "Retry when the plugin is reachable, or use save_mode='discard' / 'force' if you explicitly want an unsafe shutdown."
+                ),
+                "launched_by": "ue-commander" if ai_launched else "user",
+                "pid": pid,
+                "save_mode": normalized_save_mode,
+            }
+
+        # Fallback: OS-level terminate can only honor discard semantics.
         proc.terminate()
         try:
             proc.wait(timeout=timeout)
             _clear_lock(cfg)
-            return {"ok": True, "message": f"Closed UE via terminate (PID {pid}).", "launched_by": "ue-commander" if ai_launched else "user"}
+            if _active_monitor:
+                _active_monitor.stop()
+                _active_monitor = None
+            return {
+                "ok": True,
+                "message": f"Closed UE via terminate (PID {pid}).",
+                "launched_by": "ue-commander" if ai_launched else "user",
+                "save_mode": normalized_save_mode,
+            }
         except psutil.TimeoutExpired:
             # Last resort: force kill
             proc.kill()
             proc.wait(timeout=5)
             _clear_lock(cfg)
-            return {"ok": True, "message": f"Force-killed UE after timeout (PID {pid}).", "launched_by": "ue-commander" if ai_launched else "user"}
+            if _active_monitor:
+                _active_monitor.stop()
+                _active_monitor = None
+            return {
+                "ok": True,
+                "message": f"Force-killed UE after timeout (PID {pid}).",
+                "launched_by": "ue-commander" if ai_launched else "user",
+                "save_mode": normalized_save_mode,
+            }
     except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
         _clear_lock(cfg)
+        if _active_monitor:
+            _active_monitor.stop()
+            _active_monitor = None
         return {"ok": False, "error": str(e)}
 
 
-def close_all_ue(force: bool = False) -> dict:
+def close_all_ue(force: bool = False, timeout: int = 30, save_mode: str = "discard") -> dict:
     """Close ALL running UE editor instances. Use with caution."""
-    killed = []
+    global _active_monitor
+    normalized_save_mode = _normalize_close_save_mode(save_mode)
+    if normalized_save_mode is None:
+        return {
+            "ok": False,
+            "error": f"Unsupported save_mode '{save_mode}'. Use auto_save, prompt, discard, or force.",
+        }
+
+    processes = list(find_ue_processes(None))  # type: ignore[arg-type]
+    if not processes:
+        if _active_monitor:
+            _active_monitor.stop()
+            _active_monitor = None
+        return {
+            "ok": True,
+            "closed_pids": [],
+            "force_killed_pids": [],
+            "errors": [],
+            "save_mode": normalized_save_mode,
+            "message": "No UE processes were running.",
+        }
+
+    if force or normalized_save_mode == "force":
+        killed = []
+        errors = []
+        for proc in processes:
+            try:
+                proc.kill()
+                killed.append(proc.pid)
+            except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
+                errors.append(str(e))
+        if _active_monitor:
+            _active_monitor.stop()
+            _active_monitor = None
+        return {
+            "ok": len(errors) == 0,
+            "closed_pids": killed,
+            "force_killed_pids": killed,
+            "errors": errors,
+            "save_mode": "force",
+            "message": f"Force-closed {len(killed)} UE instance(s).",
+        }
+
+    if normalized_save_mode in {"auto_save", "prompt"}:
+        if len(processes) != 1:
+            return {
+                "ok": False,
+                "error": (
+                    f"Cannot use save_mode='{normalized_save_mode}' with {len(processes)} running UE instances. "
+                    "Close instances individually with ue_close, or use save_mode='discard' / 'force' for bulk shutdown."
+                ),
+                "pid_count": len(processes),
+                "save_mode": normalized_save_mode,
+            }
+
+        proc = processes[0]
+        plugin_attempted = False
+        errors = []
+        try:
+            from . import ue_editor
+            if ue_editor.is_plugin_available():
+                plugin_attempted = True
+                ue_editor.call_plugin("RequestExit", timeout=max(timeout, 10), SaveMode=normalized_save_mode)
+                try:
+                    proc.wait(timeout=timeout)
+                    if _active_monitor:
+                        _active_monitor.stop()
+                        _active_monitor = None
+                    return {
+                        "ok": True,
+                        "closed_pids": [proc.pid],
+                        "force_killed_pids": [],
+                        "errors": [],
+                        "save_mode": normalized_save_mode,
+                        "message": f"Closed 1 UE instance via plugin with save_mode='{normalized_save_mode}'.",
+                    }
+                except psutil.TimeoutExpired:
+                    pass
+        except Exception as e:
+            errors.append(str(e))
+
+        if plugin_attempted and normalized_save_mode == "prompt":
+            return {
+                "ok": False,
+                "error": (
+                    f"Timed out waiting for prompt-based close on UE process (PID {proc.pid}). "
+                    "Editor is still running; user may still be deciding in the save dialog."
+                ),
+                "closed_pids": [],
+                "force_killed_pids": [],
+                "errors": errors,
+                "save_mode": normalized_save_mode,
+                "prompt_pending": True,
+            }
+
+        return {
+            "ok": False,
+            "error": (
+                f"Cannot guarantee {normalized_save_mode} close because the plugin is unavailable or did not complete in time. "
+                "Retry when the plugin is reachable, or use save_mode='discard' / 'force' for bulk shutdown."
+            ),
+            "closed_pids": [],
+            "force_killed_pids": [],
+            "errors": errors,
+            "save_mode": normalized_save_mode,
+        }
+
+    closed = []
+    force_killed = []
     errors = []
-    for proc in find_ue_processes(None):  # type: ignore[arg-type]
+    for proc in processes:
         try:
             pid = proc.pid
-            if force:
+            proc.terminate()
+            try:
+                proc.wait(timeout=timeout)
+                closed.append(pid)
+            except psutil.TimeoutExpired:
                 proc.kill()
-            else:
-                proc.terminate()
-            killed.append(pid)
+                proc.wait(timeout=5)
+                closed.append(pid)
+                force_killed.append(pid)
         except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
             errors.append(str(e))
+    if _active_monitor:
+        _active_monitor.stop()
+        _active_monitor = None
     return {
         "ok": len(errors) == 0,
-        "killed_pids": killed,
+        "closed_pids": closed,
+        "force_killed_pids": force_killed,
         "errors": errors,
-        "message": f"Closed {len(killed)} UE instance(s).",
+        "save_mode": normalized_save_mode,
+        "message": f"Closed {len(closed)} UE instance(s).",
     }

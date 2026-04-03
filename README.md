@@ -48,10 +48,7 @@ Add to `.claude/settings.json` in your UE project:
         "--directory", "C:\\path\\to\\ue-commander",
         "run", "ue-commander"
       ],
-      "env": {
-        "UE_PROJECT_PATH": "C:\\path\\to\\YourProject"
-      }
-    }
+}
   }
 }
 ```
@@ -67,13 +64,34 @@ Add the same config to your MCP settings file (`.cursor/mcp.json` or equivalent)
 | `ue_project_info` | Show detected project, engine path, IDE build config |
 | `ue_status` | Check if editor is running (PID, memory, uptime) |
 | `ue_launch` | Compile + launch editor (blocks if already running) |
-| `ue_close` | Graceful close with timeout, optional force kill |
-| `ue_close_all` | Kill all UE instances |
+| `ue_close` | Close with explicit save policy: auto-save, prompt, discard, or force |
+| `ue_close_all` | Bulk close all UE instances, defaulting to discard semantics |
 | `ue_compile` | Compile C++ via UBT (defaults to IDE config) |
+| `ue_build_sessions` | Canonical build-session inspection API for active/recent builds |
+| `ue_compile_status` | Compatibility shim for one build session; prefer `ue_build_sessions` |
 | `ue_get_log` | Tail the most recent editor log |
 | `ue_get_compile_errors` | Extract structured errors from log |
 | `ue_discover_all` | Find all engines + projects on the machine |
 | `ue_find_projects` | Search specific drives for projects |
+| `ue_blueprint_workflow` | Return a stable Blueprint read/edit/verify workflow template |
+| `ue_widget_interaction_workflow` | Return a stable widget discovery/interact/verify workflow template |
+| `ue_debug_attach` | Attach CDB debugger to running editor (pauses process) |
+| `ue_debug_stacks` | Get call stacks of all threads |
+| `ue_debug_break` | Pause running editor process |
+| `ue_debug_continue` | Resume editor execution |
+| `ue_debug_eval` | Evaluate C++ expression in debug context |
+| `ue_debug_breakpoint` | Set/remove/list breakpoints |
+| `ue_debug_command` | Send raw CDB debugger command |
+| `ue_debug_detach` | Detach debugger (editor continues) |
+
+## Plugin Capability Discovery
+
+Plugin-side capability discovery now uses a two-step model:
+
+- `GET /api/tools` returns a lightweight summary index
+- `GET /api/tools/schema` returns full per-tool schema metadata on demand
+
+`ue-commander` prefers the lightweight index first, then loads full schema only when it needs to register or inspect plugin tools.
 
 ## Engine Detection
 
@@ -94,13 +112,6 @@ A single UE project can contain many `.uproject` copies. ue-commander filters th
 - Skips engine `Templates/`, `Samples/`, `FeaturePacks/`
 - Validates JSON has `EngineAssociation` field
 - Deduplicates by project root directory
-
-## Environment Variables
-
-| Variable | Description |
-|----------|-------------|
-| `UE_ENGINE_PATH` | Override engine root (skips registry detection) |
-| `UE_PROJECT_PATH` | Override project path (skips directory walk) |
 
 ## License
 
@@ -156,10 +167,7 @@ uv sync
         "--directory", "C:\\你的路径\\ue-commander",
         "run", "ue-commander"
       ],
-      "env": {
-        "UE_PROJECT_PATH": "C:\\你的路径\\YourProject"
-      }
-    }
+}
   }
 }
 ```
@@ -175,13 +183,34 @@ uv sync
 | `ue_project_info` | 显示项目、引擎路径、IDE 编译配置 |
 | `ue_status` | 检查编辑器是否运行中（PID、内存、运行时长） |
 | `ue_launch` | 编译 + 启动编辑器（已运行则阻止重复启动） |
-| `ue_close` | 优雅关闭，支持超时和强制终止 |
-| `ue_close_all` | 关闭本机所有 UE 实例 |
+| `ue_close` | 按保存策略关闭：自动保存、弹窗确认、不保存或强制终止 |
+| `ue_close_all` | 批量关闭本机所有 UE 实例，默认按不保存语义处理 |
 | `ue_compile` | 通过 UBT 编译 C++（默认使用 IDE 当前配置） |
+| `ue_build_sessions` | 规范的 build session 查询接口，用于查看当前/历史构建 |
+| `ue_compile_status` | 单 session 兼容接口；新调用优先使用 `ue_build_sessions` |
 | `ue_get_log` | 读取最近的编辑器日志尾部 |
 | `ue_get_compile_errors` | 从日志中提取结构化编译错误 |
 | `ue_discover_all` | 发现本机所有引擎 + 项目 |
 | `ue_find_projects` | 在指定盘符搜索项目 |
+| `ue_blueprint_workflow` | 返回稳定的 Blueprint 读/改/验工作流模板 |
+| `ue_widget_interaction_workflow` | 返回稳定的 Widget 发现/交互/验证工作流模板 |
+| `ue_debug_attach` | 附加 CDB 调试器到运行中的编辑器（暂停进程） |
+| `ue_debug_stacks` | 获取所有线程调用栈 |
+| `ue_debug_break` | 暂停运行中的编辑器进程 |
+| `ue_debug_continue` | 恢复编辑器执行 |
+| `ue_debug_eval` | 在调试上下文中求值 C++ 表达式 |
+| `ue_debug_breakpoint` | 设置/删除/列出断点 |
+| `ue_debug_command` | 发送原始 CDB 调试器命令 |
+| `ue_debug_detach` | 断开调试器（编辑器继续运行） |
+
+## 插件能力发现
+
+插件侧 capability discovery 现在采用两段式：
+
+- `GET /api/tools` 返回轻量摘要索引
+- `GET /api/tools/schema` 按需返回完整工具 schema
+
+`ue-commander` 会优先拉轻量索引，只有在注册或检查插件工具时才加载完整 schema。
 
 ## 引擎检测
 
@@ -202,13 +231,6 @@ uv sync
 - 跳过引擎内的 `Templates/`、`Samples/`、`FeaturePacks/`
 - 验证 JSON 包含 `EngineAssociation` 字段
 - 按项目根目录去重
-
-## 环境变量
-
-| 变量 | 说明 |
-|------|------|
-| `UE_ENGINE_PATH` | 覆盖引擎根目录（跳过注册表检测） |
-| `UE_PROJECT_PATH` | 覆盖项目路径（跳过目录扫描） |
 
 ## 许可证
 
